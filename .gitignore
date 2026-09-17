@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.reference/
+.qa/
+.cert/
+*.local
+*.log
+.env
+.env.*
+!.env.example
