@@ -62,6 +62,14 @@ describe('continuous liquid reconstruction',()=>{
     expect(crest-trough).toBeGreaterThan(.9);
     expect(crest-trough).toBeLessThan(1.3);
   });
+  it('keeps a single-marker-thick sheet visible without filling the surrounding air',()=>{
+    const particles:number[][]=[];
+    for(let x=-5;x<=5;x++)for(let z=-5;z<=5;z++)particles.push([x,0,z]);
+    for(let x=0;x<=1;x+=.1)for(let z=0;z<=1;z+=.1){
+      expect(liquid([x,0,z],particles)).toBeLessThan(0);
+      expect(liquid([x,1,z],particles)).toBeGreaterThan(0);
+    }
+  });
   it('keeps all quality atlases inside a 4096 texture without losing slices',()=>{
     for(const quality of ['low','medium','high'] as const){
       const layout=surfaceLayout(PROFILES[quality].cell,quality);

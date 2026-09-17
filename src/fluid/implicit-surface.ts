@@ -47,6 +47,7 @@ export class FluidSurface {
     this.bounds=target(1,1);
     const layers=Math.ceil(layout.support/layout.voxel);
     this.uniforms={
+      uCenter:solver.uniforms.uCenter,uInverse:solver.uniforms.uInverse,uRotation:solver.uniforms.uRotation,uClipToTank:{value:true},
       uPositions:{value:solver.positions},uParticleSize:{value:solver.particleSize},
       uFieldGrid:{value:new THREE.Vector3(...layout.grid)},uFieldOrigin:{value:new THREE.Vector3(...layout.origin)},
       uVoxel:{value:layout.voxel},uColumns:{value:layout.columns},uFieldSize:{value:new THREE.Vector2(layout.width,layout.height)},
@@ -77,6 +78,63 @@ export class FluidSurface {
   }
   resize(width:number,height:number){this.bounds.setSize(width,height);this.uniforms.uResolution.value.set(width,height);this.uniforms.uHeight.value=height;}
   setDebug(value:number){this.uniforms.uDebug.value=value;}
+  /** Read the visible isosurface, rather than treating the highest marker as water height.
+   * World-space vertical probes are intended for the upright diagnostic tank. */
+  inspectHeights(){
+    const width=33,height=19;
+    const material=new THREE.RawShaderMaterial({vertexShader:fullscreenVertex,fragmentShader:shader.fieldCommon+`
+      out vec4 result;
+      void main(){
+        vec2 xz=(gl_FragCoord.xy-.5)/vec2(32,18)*vec2(1.6,.9)-vec2(.8,.45);
+        float above=.65;
+        for(int i=1;i<=96;i++){
+          float below=.65-float(i)*1.36/96.;
+          if(fieldAt(vec3(xz.x,below,xz.y))<0.){
+            for(int j=0;j<12;j++){
+              float mid=(above+below)*.5;
+              if(fieldAt(vec3(xz.x,mid,xz.y))<0.)below=mid;else above=mid;
+            }
+            result=vec4((above+below)*.5,1,0,1);return;
+          }
+          above=below;
+        }
+        result=vec4(0);
+      }
+    `,uniforms:this.uniforms,glslVersion:THREE.GLSL3,depthTest:false,depthWrite:false});
+    const target=new THREE.WebGLRenderTarget(width,height,{type:THREE.FloatType,depthBuffer:false});
+    const previousTarget=this.renderer.getRenderTarget(),previousMaterial=this.quad.material;
+    const values=new Float32Array(width*height*4);
+    try{
+      this.quad.material=material;this.renderer.setRenderTarget(target);this.renderer.render(this.screenScene,this.screenCamera);
+      this.renderer.readRenderTargetPixels(target,0,0,width,height,values);
+      return {width,height,heights:Array.from({length:width*height},(_,i)=>values[i*4+1]>.5?values[i*4]:null)};
+    }finally{this.quad.material=previousMaterial;this.renderer.setRenderTarget(previousTarget);target.dispose();material.dispose();}
+  }
+  /** Development probes read the reconstructed GPU field, not particle counts. */
+  inspectField(points:THREE.Vector3[]){
+    return this.inspectGeometry(points).map(value=>value[0]);
+  }
+  inspectNormals(points:THREE.Vector3[]){
+    return this.inspectGeometry(points).map(value=>new THREE.Vector3(value[1],value[2],value[3]));
+  }
+  private inspectGeometry(points:THREE.Vector3[]){
+    const probeUniforms={...this.uniforms,uProbe:{value:new THREE.Vector3()}};
+    const material=new THREE.RawShaderMaterial({vertexShader:fullscreenVertex,fragmentShader:shader.fieldCommon+shader.surfaceTracing+`
+      uniform vec3 uProbe;out vec4 result;
+      void main(){result=vec4(fieldAt(uProbe),surfaceNormal(uProbe));}
+    `,uniforms:probeUniforms,glslVersion:THREE.GLSL3,depthTest:false,depthWrite:false});
+    const target=new THREE.WebGLRenderTarget(1,1,{type:THREE.FloatType,depthBuffer:false});
+    const previousTarget=this.renderer.getRenderTarget(),previousMaterial=this.quad.material;
+    const read=new Float32Array(4);
+    try{
+      this.quad.material=material;
+      return points.map(point=>{
+        probeUniforms.uProbe.value.copy(point);this.renderer.setRenderTarget(target);
+        this.renderer.render(this.screenScene,this.screenCamera);
+        this.renderer.readRenderTargetPixels(target,0,0,1,1,read);return Array.from(read);
+      });
+    }finally{this.quad.material=previousMaterial;this.renderer.setRenderTarget(previousTarget);target.dispose();material.dispose();}
+  }
   render(camera:THREE.PerspectiveCamera,background:THREE.Texture){
     const r=this.renderer,u=this.uniforms;r.autoClear=false;r.setClearColor(0,0);
     const gl=r.getContext() as WebGL2RenderingContext,timer=this.timerExtension;

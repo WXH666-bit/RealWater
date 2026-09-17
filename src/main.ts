@@ -32,6 +32,78 @@ async function start() {
     qa.className = 'qa'; qa.setAttribute('aria-label', '开发验证');
     qa.innerHTML = '<div class="qa-actions"><button data-scenario="rest">静置测试</button><button data-scenario="shake">摇晃测试</button><button data-scenario="impulse">急停波浪测试</button><button data-scenario="tilt">倾倒测试</button><button data-scenario="pour">加水测试</button><button data-scenario="droplet">水滴体积</button><button data-scenario="surface">液面形态</button><button data-scenario="capacity">容量边界测试</button><button data-scenario="stress">两分钟摇晃测试</button></div><div class="qa-actions"><button id="reset">重置</button><button id="pause">暂停</button><button id="motion">体感</button><button id="add-water">滴水</button></div><label>画质<select id="quality"><option value="low">流畅</option><option value="medium">均衡</option><option value="high">细腻</option></select></label><label>水面诊断<select id="debug-surface"><option value="0">正常</option><option value="1">深度</option><option value="2">法线</option><option value="3">厚度</option></select></label><pre id="qa-stats"></pre><p id="qa-message"></p>';
     app.append(qa);
+    const opticsButton=document.createElement('button');opticsButton.textContent='光学基准';
+    const opticsResult=document.createElement('pre');opticsResult.id='optics-result';
+    qa.querySelector('.qa-actions')!.append(opticsButton);qa.prepend(opticsResult);
+    opticsButton.addEventListener('click',async()=>{
+      opticsButton.disabled=true;
+      try{
+        const {validateOptics}=await import('./fluid/optics-validation');
+        opticsResult.textContent=JSON.stringify(validateOptics(scene.renderer),null,2);
+      }catch(error){opticsResult.textContent=String(error);}
+      finally{opticsButton.disabled=false;}
+    });
+    const boundaryButton=document.createElement('button');boundaryButton.textContent='贴壁基准';
+    const pressureButton=document.createElement('button');pressureButton.textContent='压力残差';
+    const sloshingButton=document.createElement('button');sloshingButton.textContent='小幅波浪测试';
+    qa.querySelector('.qa-actions')!.append(sloshingButton);
+    sloshingButton.addEventListener('click',()=>scene.startScenario('sloshing'));
+    const timingButton=document.createElement('button');timingButton.textContent='流体 GPU 耗时';
+    qa.querySelector('.qa-actions')!.append(timingButton);
+    timingButton.addEventListener('click',async()=>{
+      timingButton.disabled=true;opticsResult.textContent='测量中';
+      try{opticsResult.textContent=JSON.stringify(await scene.measureSolver(),null,2);}
+      catch(error){opticsResult.textContent=String(error);}
+      finally{timingButton.disabled=false;}
+    });
+    const transportButton=document.createElement('button');transportButton.textContent='平流压缩检查';
+    const fluxButton=document.createElement('button');fluxButton.textContent='面流量基准';
+    qa.querySelector('.qa-actions')!.append(fluxButton);
+    fluxButton.addEventListener('click',async()=>{
+      fluxButton.disabled=true;
+      try{const {validateTransport}=await import('./fluid/transport-validation');opticsResult.textContent=JSON.stringify(validateTransport(scene.renderer),null,2);}
+      catch(error){opticsResult.textContent=String(error);}
+      finally{fluxButton.disabled=false;}
+    });
+    qa.querySelector('.qa-actions')!.append(transportButton);
+    transportButton.addEventListener('click',()=>{scene.setPaused(true);opticsResult.textContent=JSON.stringify(scene.solver.inspectTransport(),null,2);});
+    const collisionButton=document.createElement('button');collisionButton.textContent='碰撞基准';
+    qa.querySelector('.qa-actions')!.append(collisionButton);
+    collisionButton.addEventListener('click',async()=>{
+      collisionButton.disabled=true;
+      try{const {validateCollisions}=await import('./fluid/collision-validation');opticsResult.textContent=JSON.stringify(validateCollisions(scene.renderer),null,2);}
+      catch(error){opticsResult.textContent=String(error);}
+      finally{collisionButton.disabled=false;}
+    });
+    const traceButton=document.createElement('button');traceButton.textContent='倾倒轨迹';
+    qa.querySelector('.qa-actions')!.append(traceButton);
+    traceButton.addEventListener('click',()=>scene.startScenario('tilt-trace'));
+    qa.querySelector('.qa-actions')!.append(pressureButton);
+    pressureButton.addEventListener('click',()=>{scene.setPaused(true);opticsResult.textContent=JSON.stringify(scene.solver.inspectPressure(),null,2);});
+    const transferButton=document.createElement('button');transferButton.textContent='速度传递基准';
+    qa.querySelector('.qa-actions')!.append(transferButton);
+    transferButton.addEventListener('click',async()=>{
+      transferButton.disabled=true;
+      try{const {validateTransfers}=await import('./fluid/transfer-validation');opticsResult.textContent=JSON.stringify(validateTransfers(scene.renderer),null,2);}
+      catch(error){opticsResult.textContent=String(error);}
+      finally{transferButton.disabled=false;}
+    });
+    const heightsButton=document.createElement('button');heightsButton.textContent='液面高度采样';
+    qa.querySelector('.qa-actions')!.append(heightsButton);
+    heightsButton.addEventListener('click',()=>{
+      scene.setPaused(true);
+      try{opticsResult.textContent=JSON.stringify(scene.inspectSurfaceHeights());}
+      catch(error){opticsResult.textContent=String(error);}
+    });
+    qa.querySelector('.qa-actions')!.append(boundaryButton);
+    boundaryButton.addEventListener('click',async()=>{
+      boundaryButton.disabled=true;
+      try{
+        const {validateBoundaries}=await import('./fluid/boundary-validation');
+        opticsResult.textContent=JSON.stringify(validateBoundaries(scene.renderer),null,2);
+      }catch(error){opticsResult.textContent=String(error);}
+      finally{boundaryButton.disabled=false;}
+    });
     qa.querySelectorAll<HTMLButtonElement>('[data-scenario]').forEach(button => button.addEventListener('click', () => scene.startScenario(button.dataset.scenario!)));
     qa.querySelector<HTMLSelectElement>('#debug-surface')!.addEventListener('change', event => scene.setDebug(Number((event.target as HTMLSelectElement).value)));
     const quality = qa.querySelector<HTMLSelectElement>('#quality')!;

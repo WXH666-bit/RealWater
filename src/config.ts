@@ -10,7 +10,9 @@ export const FIXED_DT = 1 / 90;
 export const METERS_PER_UNIT = 0.2;
 export const GRAVITY = 9.81 / METERS_PER_UNIT;
 export const PROFILES = {
-  low: { cell: 0.14, grid: [40, 34, 30], pressure: 20, scale: 0.7, capacity: 16384 },
+  // Low quality reduces reconstruction/pixel cost, not the minimum physics
+  // accuracy: coarser grids introduced wall-dependent volume drift at rest.
+  low: { cell: 0.105, grid: [54, 46, 40], pressure: 30, scale: 0.7, capacity: 32768 },
   medium: { cell: 0.105, grid: [54, 46, 40], pressure: 30, scale: 0.85, capacity: 32768 },
   high: { cell: 0.082, grid: [68, 58, 52], pressure: 42, scale: 1, capacity: 65536 },
 } as const;
@@ -42,7 +44,10 @@ export function initialParticles(cell: number, capacity: number) {
       }
     }
   }
-  return { positions, count, spacing };
+  // Rounding the lattice dimensions changes the actual sample spacing. Every
+  // marker represents an equal share of the specified half-tank volume.
+  const markerVolume=4*TANK.x*TANK.y*TANK.z/count;
+  return { positions, count, spacing, markerVolume };
 }
 
 /** Fixed-step clock never carries a background tab's elapsed time into physics. */

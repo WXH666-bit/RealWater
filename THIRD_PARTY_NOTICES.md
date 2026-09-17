@@ -32,7 +32,11 @@ SOFTWARE.
 
 The weighted particle-position implicit surface in `src/fluid/implicit-shaders.ts` and its CPU reference in `src/fluid/surface-field.ts` follow the mathematical method in Yongning Zhu and Robert Bridson, [Animating Sand as a Fluid](https://www.cs.ubc.ca/~rbridson/docs/zhu-siggraph05-sandfluid.pdf), ACM SIGGRAPH 2005. RealWater extends this method with a tiled GPU volume, relative-position and squared-distance moments, density-dependent radii, gap rejection, spatial smoothing and ray/isosurface intersection. No source code from that paper was copied.
 
-## Runtime dependencies
+## Affine particle/grid transfer
+
+The APIC velocity-gradient gather and affine scatter in `src/fluid/shaders.ts` implement the method of Chenfanfu Jiang, Craig Schroeder, Andrew Selle, Joseph Teran and Alexey Stomakhin, [The Affine Particle-In-Cell Method](https://www.andyselle.com/papers/24/), SIGGRAPH 2015 ([technical report](https://www.cs.ucr.edu/~craigs/papers/2015-apic/tech-doc.pdf)). RealWater uses staggered MAC velocities and multilinear weights; gradients are evaluated directly to avoid singular moment-matrix inversion on grid planes. No source code from the paper was copied. The earlier dli/fluid attribution and license above continue to apply to the adapted grid and transfer infrastructure.
+
+## Runtime packages
 
 - Three.js: MIT, https://github.com/mrdoob/three.js
 
