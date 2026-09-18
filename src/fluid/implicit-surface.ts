@@ -3,6 +3,7 @@ import type { FluidSolver } from './solver';
 import { fullscreenVertex } from './shaders';
 import { surfaceLayout } from './surface-field';
 import * as shader from './implicit-shaders';
+import { FIXED_DT } from '../config';
 
 /** GPU volume reconstruction followed by ray/isosurface intersection.
  * The visible geometry is a world-space surface, not camera-facing particles. */
@@ -16,6 +17,7 @@ export class FluidSurface {
   private moments:THREE.WebGLRenderTarget;
   private field:THREE.WebGLRenderTarget;
   private smooth:THREE.WebGLRenderTarget;
+  private history:THREE.WebGLRenderTarget;
   private bounds:THREE.WebGLRenderTarget;
   private pointScene=new THREE.Scene();
   private boundScene=new THREE.Scene();
@@ -41,14 +43,16 @@ export class FluidSurface {
       const rt=new THREE.WebGLRenderTarget(w,h,{count,type:THREE.HalfFloatType,format,minFilter:THREE.LinearFilter,magFilter:THREE.LinearFilter,depthBuffer:false});this.targets.push(rt);return rt;
     };
     this.moments=target(layout.width,layout.height,THREE.RGBAFormat,2);
-    this.moments.textures[1].format=THREE.RedFormat;
+    this.moments.textures[1].format=THREE.RGFormat;
     this.field=target(layout.width,layout.height,THREE.RedFormat);
     this.smooth=target(layout.width,layout.height,THREE.RedFormat);
+    this.history=target(layout.width,layout.height,THREE.RedFormat);
     this.bounds=target(1,1);
     const layers=Math.ceil(layout.support/layout.voxel);
     this.uniforms={
       uCenter:solver.uniforms.uCenter,uInverse:solver.uniforms.uInverse,uRotation:solver.uniforms.uRotation,uClipToTank:{value:true},
       uPositions:{value:solver.positions},uParticleSize:{value:solver.particleSize},
+      uParticleVelocities:{value:solver.velocities},uHistory:{value:this.history.texture},uHistorySeconds:{value:0},uHasHistory:{value:false},
       uFieldGrid:{value:new THREE.Vector3(...layout.grid)},uFieldOrigin:{value:new THREE.Vector3(...layout.origin)},
       uVoxel:{value:layout.voxel},uColumns:{value:layout.columns},uFieldSize:{value:new THREE.Vector2(layout.width,layout.height)},
       uSupport:{value:layout.support},uSurfaceRadius:{value:layout.radius},uDropRadius:{value:layout.dropRadius},uSplatSize:{value:layers*2+1},uLayer:{value:0},
@@ -80,7 +84,7 @@ export class FluidSurface {
   setDebug(value:number){this.uniforms.uDebug.value=value;}
   /** Read the visible isosurface, rather than treating the highest marker as water height.
    * World-space vertical probes are intended for the upright diagnostic tank. */
-  inspectHeights(){
+  inspectHeights(raw=false){
     const width=33,height=19;
     const material=new THREE.RawShaderMaterial({vertexShader:fullscreenVertex,fragmentShader:shader.fieldCommon+`
       out vec4 result;
@@ -94,7 +98,7 @@ export class FluidSurface {
               float mid=(above+below)*.5;
               if(fieldAt(vec3(xz.x,mid,xz.y))<0.)below=mid;else above=mid;
             }
-            result=vec4((above+below)*.5,1,0,1);return;
+            result=vec4((above+below)*.5,1,fieldAt(vec3(xz.x,-.68,xz.y)),fieldAt(vec3(xz.x,-.5,xz.y)));return;
           }
           above=below;
         }
@@ -102,13 +106,29 @@ export class FluidSurface {
       }
     `,uniforms:this.uniforms,glslVersion:THREE.GLSL3,depthTest:false,depthWrite:false});
     const target=new THREE.WebGLRenderTarget(width,height,{type:THREE.FloatType,depthBuffer:false});
-    const previousTarget=this.renderer.getRenderTarget(),previousMaterial=this.quad.material;
+    const previousTarget=this.renderer.getRenderTarget(),previousMaterial=this.quad.material,previousField=this.uniforms.uField.value;
     const values=new Float32Array(width*height*4);
     try{
+      if(raw)this.uniforms.uField.value=this.field.texture;
       this.quad.material=material;this.renderer.setRenderTarget(target);this.renderer.render(this.screenScene,this.screenCamera);
       this.renderer.readRenderTargetPixels(target,0,0,width,height,values);
-      return {width,height,heights:Array.from({length:width*height},(_,i)=>values[i*4+1]>.5?values[i*4]:null)};
-    }finally{this.quad.material=previousMaterial;this.renderer.setRenderTarget(previousTarget);target.dispose();material.dispose();}
+      const interior=Array.from({length:width*height},(_,i)=>i).filter(i=>values[i*4+1]>.5&&values[i*4]>-.3);
+      return {width,height,heights:Array.from({length:width*height},(_,i)=>values[i*4+1]>.5?values[i*4]:null),interior:{samples:interior.length,bottomVoids:interior.filter(i=>values[i*4+2]>0).length,middleVoids:interior.filter(i=>values[i*4+3]>0).length,maxBottomPhi:Math.max(...interior.map(i=>values[i*4+2]))}};
+    }finally{this.uniforms.uField.value=previousField;this.quad.material=previousMaterial;this.renderer.setRenderTarget(previousTarget);target.dispose();material.dispose();}
+  }
+  inspectSurfaceFiltering(){
+    const filtered=this.inspectHeights(),raw=this.inspectHeights(true);
+    const summarize=(sample:typeof filtered)=>{
+      const heights=sample.heights.filter((h):h is number=>h!==null);
+      const mean=heights.reduce((sum,h)=>sum+h,0)/heights.length;
+      const residuals:number[]=[];
+      for(let z=1;z<sample.height-1;z++)for(let x=1;x<sample.width-1;x++){
+        const i=z*sample.width+x,neighbors=[i,i-1,i+1,i-sample.width,i+sample.width].map(j=>sample.heights[j]);
+        if(neighbors.every((h):h is number=>h!==null))residuals.push(neighbors[0]-(neighbors[1]+neighbors[2]+neighbors[3]+neighbors[4])/4);
+      }
+      return {samples:heights.length,mean,rms:Math.sqrt(heights.reduce((sum,h)=>sum+(h-mean)**2,0)/heights.length),localRms:Math.sqrt(residuals.reduce((sum,h)=>sum+h*h,0)/residuals.length)};
+    };
+    return {...filtered,comparison:{raw:summarize(raw),filtered:summarize(filtered)}};
   }
   /** Development probes read the reconstructed GPU field, not particle counts. */
   inspectField(points:THREE.Vector3[]){
@@ -149,6 +169,7 @@ export class FluidSurface {
       this.nextTiming=performance.now()+1000;
     }
     u.uPositions.value=this.solver.positions;
+    u.uParticleVelocities.value=this.solver.velocities;
     u.uInverseProjection.value.copy(camera.projectionMatrixInverse);u.uCameraWorld.value.copy(camera.matrixWorld);
     u.uViewProjection.value.multiplyMatrices(camera.projectionMatrix,camera.matrixWorldInverse);u.uCameraPosition.value.copy(camera.position);u.uBackground.value=background;
     if(this.fieldRevision!==this.solver.revision){
@@ -157,10 +178,14 @@ export class FluidSurface {
       for(let layer=-layers;layer<=layers;layer++){u.uLayer.value=layer;r.render(this.pointScene,this.screenCamera);}
       this.quad.material=this.fieldMaterial;r.setRenderTarget(this.field);r.render(this.screenScene,this.screenCamera);
       u.uField.value=this.field.texture;
+      u.uHistory.value=this.history.texture;
+      u.uHasHistory.value=this.fieldRevision>=0;
+      u.uHistorySeconds.value=(this.solver.revision-this.fieldRevision)*FIXED_DT;
       this.quad.material=this.smoothMaterial;r.setRenderTarget(this.smooth);r.render(this.screenScene,this.screenCamera);
+      [this.history,this.smooth]=[this.smooth,this.history];
       this.fieldRevision=this.solver.revision;
     }
-    u.uField.value=this.smooth.texture;
+    u.uField.value=this.history.texture;
     u.uSpriteRadius.value=this.layout.support;u.uOutsideOnly.value=false;
     this.envelopes.material=this.boundsMaterial;r.setRenderTarget(this.bounds);r.clear();r.render(this.boundScene,camera);
     this.quad.material=this.rayMaterial;r.setRenderTarget(null);r.render(this.screenScene,this.screenCamera);

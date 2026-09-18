@@ -201,7 +201,7 @@ export class WaterScene {
       this.onUpdate?.();return;
     }
     if(kind==='droplet')this.emitWater();
-    this.qaResult='运行中';this.qaScenario={kind,elapsed:0,duration:kind==='sloshing'?12:kind==='tilt-trace'?20:kind==='rest'?60:kind==='stress'?120:kind==='surface'?1.2:kind==='droplet'?.08:8,start:performance.now()};
+    this.qaResult='运行中';this.qaScenario={kind,elapsed:0,duration:kind==='settle'?30:kind==='sloshing'?12:kind==='tilt-trace'?20:kind==='rest'?60:kind==='stress'?120:kind==='surface'?1.2:kind==='droplet'?.08:8,start:performance.now()};
   }
   private visibility=()=>{this.hidden=document.hidden;this.clock.reset();this.last=0;this.stopAllPour();this.onUpdate?.();};
   private contextLost=(event:Event)=>{event.preventDefault();this.lost=true;this.clock.reset();this.stopAllPour();this.onUpdate?.();this.onError?.('图形连接已中断。恢复后会重新初始化水体。');};
@@ -228,6 +228,7 @@ export class WaterScene {
         if(scenario.kind==='impulse')this.setPose(clamp((scenario.elapsed-2)/.15,0,1)*.35,0);
         if(scenario.kind==='sloshing')this.setPose(clamp((scenario.elapsed-2)/.15,0,1)*.04,0);
         if(scenario.kind==='surface')this.setPose(scenario.elapsed<.4?.25*Math.sin(scenario.elapsed*Math.PI/.4):0,0);
+        if(scenario.kind==='settle')this.setPose(scenario.elapsed<.6?.45*Math.sin(scenario.elapsed*2*Math.PI/.6):0,0);
         if(scenario.kind==='pour'&&Math.floor(scenario.elapsed*8)!==Math.floor((scenario.elapsed-FIXED_DT)*8))this.emitWater();
         this.targetQ.setFromEuler(this.targetEuler);
       }
@@ -235,7 +236,7 @@ export class WaterScene {
       this.quaternion.rotateTowards(this.targetQ,2.5*FIXED_DT);
       this.solver.step(this.position,this.quaternion,this.vp);this.warmup+=FIXED_DT;this.reportSimulatedTime+=FIXED_DT;
       const sampleRate=scenario?.kind==='sloshing'?30:10;
-      if((scenario?.kind==='impulse'||scenario?.kind==='sloshing')&&Math.floor(scenario.elapsed*sampleRate)!==Math.floor((scenario.elapsed-FIXED_DT)*sampleRate)){
+      if((scenario?.kind==='impulse'||scenario?.kind==='sloshing'||scenario?.kind==='settle')&&Math.floor(scenario.elapsed*sampleRate)!==Math.floor((scenario.elapsed-FIXED_DT)*sampleRate)){
         const stats=this.solver.inspect();this.qaSamples.push({time:scenario.elapsed,offsetX:stats.meanX-this.position.x,speed:stats.rmsSpeed,surfaceY:stats.maxY});
       }
       if(scenario?.kind==='tilt-trace'&&[8,12,20].some(t=>scenario.elapsed>=t&&scenario.elapsed-FIXED_DT<t)){
@@ -245,6 +246,7 @@ export class WaterScene {
         const coincidentMarkers=all.length-new Set(all.map(marker=>marker.position.join(','))).size;
         this.qaMarkerSamples.push({time:scenario.elapsed,active:stats.active,maxY:stats.maxY,rmsSpeed:stats.rmsSpeed,coincidentMarkers,markers:all.filter(marker=>tracked.has(marker.id)||highest.has(marker.id))});
       }
+      if(scenario?.kind==='settle'&&scenario.elapsed>=scenario.duration)this.setPaused(true);
       if(scenario&&scenario.elapsed>=scenario.duration){
         this.solver.inspect();
         const stats=this.solver.stats,checks:Record<string,boolean>={finite:stats.invalid===0};
@@ -289,7 +291,7 @@ export class WaterScene {
   setDebug(value:number){this.surface.setDebug(value);}
   inspectSurfaceHeights(){
     if(this.position.lengthSq()>1e-6||Math.abs(this.quaternion.w)<.999999)throw new Error('液面高度采样需要正立、居中的容器；请先运行静置测试。');
-    return this.surface.inspectHeights();
+    return this.surface.inspectSurfaceFiltering();
   }
   get surfaceGpuMilliseconds(){return this.surface.gpuMilliseconds;}
   measureSolver(){this.setPaused(true);this.qaScenario=null;this.qaResult='GPU 耗时测量，不作为场景验收';return this.solver.measureSteps(this.position.clone(),this.quaternion.clone(),this.vp.clone());}

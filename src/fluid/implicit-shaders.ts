@@ -51,15 +51,19 @@ float fieldAt(vec3 p){
 
 export const momentVertex=fieldCommon+`
 uniform sampler2D uPositions;
+uniform sampler2D uParticleVelocities;
 uniform vec2 uParticleSize;
 uniform int uLayer;
 uniform float uSplatSize;
 flat out vec3 vParticle;
+flat out float vSpeedSquared;
 flat out int vLayer;
 void main(){
   vec4 p=texelFetch(uPositions,ivec2(gl_VertexID%int(uParticleSize.x),gl_VertexID/int(uParticleSize.x)),0);
   vec3 g=(p.xyz-uFieldOrigin)/uVoxel-.5;
   vParticle=p.xyz;vLayer=int(floor(g.z))+uLayer;
+  vec3 velocity=texelFetch(uParticleVelocities,ivec2(gl_VertexID%int(uParticleSize.x),gl_VertexID/int(uParticleSize.x)),0).xyz;
+  vSpeedSquared=dot(velocity,velocity);
   ivec3 center=ivec3(ivec2(floor(g.xy)),vLayer);
   vec2 pixel=vec2(fieldAtlas(center))+.5;
   gl_Position=vec4(pixel/uFieldSize*2.-1.,0,1);gl_PointSize=uSplatSize;
@@ -68,6 +72,7 @@ void main(){
 `;
 export const momentFragment=fieldCommon+`
 flat in vec3 vParticle;
+flat in float vSpeedSquared;
 flat in int vLayer;
 layout(location=0)out vec4 result;
 layout(location=1)out vec4 spread;
@@ -78,7 +83,7 @@ void main(){
   float w=t*t*t;
   // Relative moments retain precision in the additive half-float buffer.
   result=vec4(delta*w,w);
-  spread=vec4(dot(delta,delta)*w,0,0,1);
+  spread=vec4(dot(delta,delta)*w,vSpeedSquared*w,0,0);
 }
 `;
 export const fieldFragment=fieldCommon+`
@@ -127,6 +132,9 @@ void main(){
 }
 `;
 export const smoothFieldFragment=fieldCommon+`
+uniform sampler2D uHistory;
+uniform float uHistorySeconds;
+uniform bool uHasHistory;
 out vec4 result;
 void main(){
   ivec3 q=fieldCoord(gl_FragCoord.xy);
@@ -139,9 +147,50 @@ void main(){
     float farValue=texelFetch(uField,fieldAtlas(q+off*2),0).r;
     sum+=mix(nearValue,farValue,dense);
   }
-  // Spatial filtering only: there is no temporal blend or lag in the wave.
+  // Spatial filtering of the current frame; moving water bypasses history below.
   // Dense water loses particle-scale dimples; separate spray is preserved.
-  result=vec4(mix(center,sum/10.,mix(.12,.65,dense)),0,0,1);
+  float filtered=mix(center,sum/10.,mix(.12,.65,dense));
+  // Filter the actual free surface, not just its lighting normal. Restrict the
+  // wider stencil to dense, nearly horizontal liquid and mirror at wet walls.
+  // A symmetric horizontal kernel preserves a plane and broad wave slopes.
+  vec3 gradient=vec3(0);
+  for(int axis=0;axis<3;axis++){
+    ivec3 off=ivec3(0);off[axis]=1;
+    gradient[axis]=texelFetch(uField,fieldAtlas(q+off),0).r-texelFetch(uField,fieldAtlas(q-off),0).r;
+  }
+  float horizontal=smoothstep(.85,.98,gradient.y/max(length(gradient),1e-6));
+  if(dense>.01&&horizontal>.01&&abs(center)<uVoxel*3.){
+    vec3 point=voxelWorld(q),local=uInverse*(point-uCenter);
+    bool interior=uClipToTank&&all(lessThanEqual(abs(local.xz),tank.xz))&&local.y>=-tank.y&&local.y<=tank.y;
+    float total=0.,weightSum=0.;
+    for(int z=-2;z<=2;z++)for(int x=-2;x<=2;x++){
+      vec3 samplePoint=point+vec3(float(x),0,float(z))*uVoxel*2.;
+      if(interior){
+        vec3 p=uInverse*(samplePoint-uCenter);
+        if(abs(p.x)>tank.x)p.x=sign(p.x)*(2.*tank.x-abs(p.x));
+        if(abs(p.z)>tank.z)p.z=sign(p.z)*(2.*tank.z-abs(p.z));
+        samplePoint=uRotation*p+uCenter;
+      }
+      float value=sampleFieldTexture(uField,samplePoint).r;
+      float wx=x==0?6.:(abs(x)==1?4.:1.);
+      float wz=z==0?6.:(abs(z)==1?4.:1.);
+      // Exclude disconnected/sparse neighborhoods rather than bridging spray.
+      float supported=smoothstep(2.,10.,sampleFieldTexture(uMoments,samplePoint).a);
+      float weight=wx*wz*supported;
+      total+=value*weight;weightSum+=weight;
+    }
+    if(weightSum>1e-5)filtered=mix(filtered,total/weightSum,dense*horizontal);
+  }
+  // Only suppress temporal sampling noise in almost stationary dense water.
+  // Moving waves and falling drops use the current field without history.
+  // History uses simulated time, so batch tests and slow frames cannot freeze it.
+  float mass=texelFetch(uMoments,fieldAtlas(q),0).a;
+  float speed=sqrt(max(texelFetch(uSpread,fieldAtlas(q),0).g/max(mass,1e-5),0.));
+  float retention=exp(-uHistorySeconds/.10)*(1.-smoothstep(.04,.16,speed))*dense;
+  float previous=texelFetch(uHistory,fieldAtlas(q),0).r;
+  float agreement=1.-smoothstep(uVoxel*.25,uVoxel,abs(previous-filtered));
+  if(uHasHistory)filtered=mix(filtered,previous,retention*agreement);
+  result=vec4(filtered,0,0,1);
 }
 `;
 
@@ -275,15 +324,7 @@ vec3 surfaceNormal(vec3 point){
     }
   }
   vec3 gradient=vec3(normalFieldAt(point+vec3(e,0,0),mirror)-normalFieldAt(point-vec3(e,0,0),mirror),normalFieldAt(point+vec3(0,e,0),mirror)-normalFieldAt(point-vec3(0,e,0),mirror),normalFieldAt(point+vec3(0,0,e),mirror)-normalFieldAt(point-vec3(0,0,e),mirror));
-  vec3 normal=gradient/max(length(gradient),1e-6);
-  // The finite particle neighborhood leaves sub-grid ripples even at rest.
-  // Grazing reflections amplify these into a wrinkled, gelatin-like skin.
-  // Suppress only the near-horizontal normal noise floor in dense water;
-  // resolved wave slopes and sparse curved droplets retain their normals.
-  float slope=length(normal.xz);
-  float resolved=smoothstep(.025,.12,slope);
-  float quiet=dense*smoothstep(.96,.995,normal.y)*(1.-resolved);
-  return normalize(mix(normal,vec3(0,1,0),quiet));
+  return gradient/max(length(gradient),1e-6);
 }
 // Find the first exit of this connected volume, along the refracted ray.
 // The reconstruction is not a distance field inside; cap every step.
@@ -308,7 +349,44 @@ bool waterExit(vec3 entry,vec3 direction,out vec3 exitPoint,out float distance){
   exitPoint=entry+direction*distance;return false;
 }
 `;
-export const rayFragment=fieldCommon+waterOptics+surfaceTracing+`
+export const interiorRadiance=`
+vec3 traceInterior(vec3 point,vec3 inside,vec3 cameraPosition,float height,out float thickness,out vec3 pathStatus){
+  vec3 transmitted=vec3(0),throughput=vec3(1),pathPoint=point,pathDirection=inside;
+  pathStatus=vec3(1,1,0);
+  thickness=0.;bool escaped=false;
+  // Follow the reflected remainder at EVERY interface, including partial
+  // reflection. Previously it sampled the sky while still inside the water,
+  // creating bright patches and a discontinuity at the critical angle.
+  for(int bounce=0;bounce<4;bounce++){
+    vec3 exitPoint;float segment;
+    if(!waterExit(pathPoint,pathDirection,exitPoint,segment)){
+      if(bounce==0)pathStatus=vec3(1,0,0);
+      break;
+    }
+    if(bounce==0)thickness=segment;
+    vec3 absorption=exp(-vec3(.065,.015,.008)*segment);
+    transmitted+=throughput*vec3(.008,.025,.032)*(1.-absorption);
+    throughput*=absorption;
+    vec3 exitNormal=surfaceNormal(exitPoint);
+    if(dot(exitNormal,pathDirection)<0.)exitNormal=-exitNormal;
+    float f=dielectricFresnel(dot(exitNormal,pathDirection),1.333);
+    if(f<1.){
+      vec3 outgoing=refract(pathDirection,-exitNormal,1.333);
+      transmitted+=throughput*(1.-f)*transmittedBackground(exitPoint,outgoing,cameraPosition,height);
+      if(!escaped)pathStatus=bounce==0?vec3(0,.7,0):vec3(0,.4,1);
+      escaped=true;
+    }
+    throughput*=f;
+    pathPoint=exitPoint;pathDirection=reflect(pathDirection,exitNormal);
+    if(max(throughput.r,max(throughput.g,throughput.b))<.005)break;
+  }
+  // Bounded residual for paths beyond the bounce budget; never add the full
+  // environment after already accumulating transmitted energy.
+  transmitted+=throughput*transmittedBackground(pathPoint,pathDirection,cameraPosition,height);
+  return transmitted;
+}
+`;
+export const rayFragment=fieldCommon+waterOptics+surfaceTracing+interiorRadiance+`
 uniform sampler2D uBounds;
 uniform sampler2D uBackground;
 uniform vec2 uResolution;
@@ -344,34 +422,13 @@ void main(){
   vec4 projected=uViewProjection*vec4(point,1);gl_FragDepth=projected.z/projected.w*.5+.5;
   if(uDebug==1){result=vec4(vec3(t/9.),1);return;}
   if(uDebug==2){result=vec4(n*.5+.5,1);return;}
-  vec3 inside=refract(ray,n,1./1.333),exitPoint;
-  float thickness;
-  bool foundExit=waterExit(point,inside,exitPoint,thickness);
-  if(uDebug==3){result=vec4(vec3(thickness*.5),1);return;}
+  vec3 inside=refract(ray,n,1./1.333);
   float fresnel=dielectricFresnel(dot(n,-ray),1./1.333);
-  vec3 exitNormal=surfaceNormal(exitPoint);
-  if(dot(exitNormal,inside)<0.)exitNormal=-exitNormal;
-  vec3 outgoing=refract(inside,-exitNormal,1.333);
-  float exitFresnel=dielectricFresnel(dot(exitNormal,inside),1.333);
-  vec3 internalReflection=environment(reflect(inside,exitNormal));
-  vec3 transmitted=internalReflection;
-  if(foundExit&&exitFresnel<1.)transmitted=mix(transmittedBackground(exitPoint,outgoing,uCameraPosition,uResolution.y),internalReflection,exitFresnel);
-  else if(foundExit){
-    // Resolve one internal bounce instead of shading TIR as an opaque skin.
-    vec3 bounce=reflect(inside,exitNormal),secondExit;
-    float secondDistance;
-    if(waterExit(exitPoint,bounce,secondExit,secondDistance)){
-      thickness+=secondDistance;
-      vec3 secondNormal=surfaceNormal(secondExit);
-      if(dot(secondNormal,bounce)<0.)secondNormal=-secondNormal;
-      vec3 secondOut=refract(bounce,-secondNormal,1.333);
-      float secondFresnel=dielectricFresnel(dot(secondNormal,bounce),1.333);
-      if(secondFresnel<1.)transmitted=mix(transmittedBackground(secondExit,secondOut,uCameraPosition,uResolution.y),environment(reflect(bounce,secondNormal)),secondFresnel);
-    }
-  }
-  vec3 absorption=exp(-vec3(.065,.015,.008)*thickness);
-  transmitted=transmitted*absorption+vec3(.008,.025,.032)*(1.-absorption);
-  vec3 reflection=environment(reflect(ray,n));
+  float thickness;vec3 pathStatus;
+  vec3 transmitted=traceInterior(point,inside,uCameraPosition,uResolution.y,thickness,pathStatus);
+  if(uDebug==3){result=vec4(vec3(thickness*.5),1);return;}
+  if(uDebug==4){result=vec4(pathStatus,1);return;}
+  vec3 reflection=transmittedBackground(point,reflect(ray,n),uCameraPosition,uResolution.y);
   vec3 color=mix(transmitted,reflection,fresnel);
   result=vec4(displayColor(color),1);
 }

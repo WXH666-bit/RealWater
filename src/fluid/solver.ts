@@ -132,6 +132,7 @@ export class FluidSolver {
   }
 
   get positions() { return this.particles.textures[0]; }
+  get velocities() { return this.particles.textures[1]; }
   private dataTexture(data: Float32Array) {
     const texture = new THREE.DataTexture(data, this.particleSize.x, this.particleSize.y, THREE.RGBAFormat, THREE.FloatType);
     texture.needsUpdate = true; return texture;
@@ -296,13 +297,15 @@ export class FluidSolver {
             float open=at(uBoundary,q)[axis];
             if(open>0.&&(fluid(q)||fluid(q-off))){a+=open*before[axis]*before[axis];b+=open*after[axis]*after[axis];weight+=open;}
           }
-          result=vec4(a,b,weight,fluid(q)?max(at(uWeights,q).a-uRestDensity,0.)*.25:0.);return;
+          result=vec4(a,b,weight,fluid(q)?max(at(uWeights,q).a-uRestDensity,0.)*.35:0.);return;
         }
         ivec3 q=coord();if(!fluid(q)){result=vec4(0);return;}
         float sum=0.,n=0.;
         for(int axis=0;axis<3;axis++)for(int sign=-1;sign<=1;sign+=2){
           ivec3 off=ivec3(0);off[axis]=sign;ivec3 p=q+off;
-          float weight=at(uBoundary,sign>0?p:q)[axis];n+=weight;sum+=weight*at(uPressure,p).r;
+          float weight=at(uBoundary,sign>0?p:q)[axis];
+          if(fluid(p)){n+=weight;sum+=weight*at(uPressure,p).r;}
+          else n+=weight/surfaceFraction(q,p);
         }
         float rhs=at(uDivergence,q).r,residual=n*at(uPressure,q).r-sum+rhs;
         result=vec4(residual*residual,abs(residual),rhs*rhs,1);

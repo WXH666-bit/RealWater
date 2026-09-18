@@ -57,6 +57,13 @@ vec3 sampleVelocity(sampler2D t,vec3 p){
   return vec3(sampleGrid(t,g-vec3(0,.5,.5)).x,sampleGrid(t,g-vec3(.5,0,.5)).y,sampleGrid(t,g-vec3(.5,.5,0)).z);
 }
 bool fluid(ivec3 q){float volume=at(uBoundary,q).a;return volume>.01&&at(uWeights,q).a>.5*max(volume,.1);}
+// Place zero air pressure at the interpolated liquid boundary, not at the
+// next grid centre. The same fraction must be used by solve and projection.
+float surfaceFraction(ivec3 liquid,ivec3 air){
+  float a=at(uWeights,liquid).a-.5*max(at(uBoundary,liquid).a,.1);
+  float b=at(uWeights,air).a-.5*max(at(uBoundary,air).a,.1);
+  return clamp(a/max(a-b,1e-5),.1,1.);
+}
 vec3 wallVelocity(vec3 p){return uLinear+cross(uAngular,p-uCenter);}
 float face(sampler2D tex,ivec3 q,int axis){
   vec3 p=world(q);p[axis]-=.5*uCell;
@@ -198,7 +205,7 @@ void main(){
   float div=face(uGridVelocity,q+ivec3(1,0,0),0)-face(uGridVelocity,q,0)+face(uGridVelocity,q+ivec3(0,1,0),1)-face(uGridVelocity,q,1)+face(uGridVelocity,q+ivec3(0,0,1),2)-face(uGridVelocity,q,2);
   // Correct bulk crowding using the same marker volume as initialization and
   // emission. Partial wall volume is not a particle-kernel mass fraction.
-  div-=max(at(uWeights,q).a-uRestDensity,0.)*.25;
+  div-=max(at(uWeights,q).a-uRestDensity,0.)*.35;
   result=vec4(div,0,0,1);
 }
 `;
@@ -210,7 +217,8 @@ void main(){
   for(int axis=0;axis<3;axis++)for(int sign=-1;sign<=1;sign+=2){
     ivec3 offset=ivec3(0);offset[axis]=sign;ivec3 p=q+offset;
     float open=at(uBoundary,sign>0?p:q)[axis];
-    sum+=open*at(uPressure,p).r;n+=open;
+    if(fluid(p)){sum+=open*at(uPressure,p).r;n+=open;}
+    else n+=open/surfaceFraction(q,p);
   }
   result=vec4(n>1e-4?(sum-at(uDivergence,q).r)/n:0.,0,0,1);
 }
@@ -224,7 +232,10 @@ void main(){
     float open=at(uBoundary,q)[axis];
     if(open<=0.){
       vec3 p=world(q);p[axis]-=.5*uCell;v[axis]=wallVelocity(p)[axis];
-    }else if(fluid(q)||fluid(q-off))v[axis]-=at(uPressure,q).r-at(uPressure,q-off).r;
+    }else if(fluid(q)||fluid(q-off)){
+      float fraction=fluid(q)&&fluid(q-off)?1.:(fluid(q)?surfaceFraction(q,q-off):surfaceFraction(q-off,q));
+      v[axis]-=(at(uPressure,q).r-at(uPressure,q-off).r)/fraction;
+    }
     // Blocked faces are excluded from pressure flux, but extrapolated for
     // particle advection: a zero velocity inside glass would erase tangents.
     // Air faces containing marker-kernel tails are not pressure-projected.

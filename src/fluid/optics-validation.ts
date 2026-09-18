@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { PROFILES, type Quality } from '../config';
 import { fullscreenVertex } from './shaders';
-import { dielectricOptics, fieldCommon, surfaceTracing } from './implicit-shaders';
+import { dielectricOptics, fieldCommon, surfaceTracing, interiorRadiance } from './implicit-shaders';
 
 /** Development-only GPU checks of the exact tracing functions used by water.
  * Analytic slabs/spheres provide independent exit positions and Snell angles. */
@@ -26,11 +26,18 @@ export function validateOptics(renderer:THREE.WebGLRenderer){
       phi=vec4(max(distance,-uInterior),0,0,1);moments=vec4(0,0,0,8);
     }`);
   const probe=make(fieldCommon+dielectricOptics+surfaceTracing+`
+    vec3 transmittedBackground(vec3 point,vec3 direction,vec3 cameraPosition,float height){return vec3(1);}
+  `+interiorRadiance+`
     uniform vec3 uEntry;uniform vec3 uRay;uniform int uTestMode;uniform float uEta;
     out vec4 result;
     void main(){
       if(uTestMode==1){vec3 t=refract(uRay,vec3(0,1,0),uEta);result=vec4(t,dielectricFresnel(-uRay.y,uEta));return;}
       if(uTestMode==2){vec3 end;float path;bool found=waterExit(uEntry,uRay,end,path);result=vec4(found?1.:0.,0,0,0);return;}
+      if(uTestMode==3){
+        vec3 status;float path;
+        vec3 color=traceInterior(uEntry,refract(uRay,vec3(0,1,0),1./1.333),vec3(0,2,3),720.,path,status);
+        result=vec4(color,path);return;
+      }
       vec3 inside=refract(uRay,vec3(0,1,0),1./1.333),exitPoint;float distance;
       bool found=waterExit(uEntry,inside,exitPoint,distance);
       vec3 n=surfaceNormal(exitPoint);
@@ -76,6 +83,19 @@ export function validateOptics(renderer:THREE.WebGLRenderer){
           const normal=shape===0?new THREE.Vector3(0,-1,0):exit.clone().normalize();
           const outgoing=refract(inside,normal.negate(),1.333);
           inspect(`${quality}/${shape===0?'slab':'sphere'}/${angle}deg`,[...outgoing.toArray(),distance],shape===0?.006:.06);
+          if(shape===0){
+            // Independent infinite-series solution for a parallel slab in a
+            // uniform white environment, including absorption and scattering.
+            const c=Math.cos(theta),ct=-inside.y,eta=1/1.333;
+            const f=.5*(((eta*c-ct)/(eta*c+ct))**2+((c-eta*ct)/(c+eta*ct))**2);
+            const expected=[.065,.015,.008].map((sigma,i)=>{
+              const a=Math.exp(-sigma*distance),scatter=[.008,.025,.032][i];
+              return (scatter*(1-a)+a*(1-f))/(1-a*f);
+            });
+            uniforms.uTestMode.value=3;
+            inspect(`${quality}/slab radiance/${angle}deg`,[...expected,distance],.003);
+            uniforms.uTestMode.value=0;
+          }
         }
         if(shape===1){
           uniforms.uTestMode.value=2;uniforms.uRay.value.set(0,1,0);

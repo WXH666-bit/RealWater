@@ -48,6 +48,17 @@ async function start() {
     const sloshingButton=document.createElement('button');sloshingButton.textContent='小幅波浪测试';
     qa.querySelector('.qa-actions')!.append(sloshingButton);
     sloshingButton.addEventListener('click',()=>scene.startScenario('sloshing'));
+    const settleButton=document.createElement('button');settleButton.textContent='摇晃后静置';
+    qa.querySelector('.qa-actions')!.append(settleButton);
+    settleButton.addEventListener('click',()=>scene.startScenario('settle'));
+    const hydroButton=document.createElement('button');hydroButton.textContent='静水压力基准';
+    qa.querySelector('.qa-actions')!.append(hydroButton);
+    hydroButton.addEventListener('click',async()=>{
+      scene.setPaused(true);hydroButton.disabled=true;
+      try{const {validateFreeSurfacePressure}=await import('./fluid/pressure-validation');opticsResult.textContent=JSON.stringify(validateFreeSurfacePressure(scene.renderer),null,2);}
+      catch(error){opticsResult.textContent=String(error);}
+      finally{hydroButton.disabled=false;}
+    });
     const timingButton=document.createElement('button');timingButton.textContent='流体 GPU 耗时';
     qa.querySelector('.qa-actions')!.append(timingButton);
     timingButton.addEventListener('click',async()=>{
@@ -105,6 +116,15 @@ async function start() {
       finally{boundaryButton.disabled=false;}
     });
     qa.querySelectorAll<HTMLButtonElement>('[data-scenario]').forEach(button => button.addEventListener('click', () => scene.startScenario(button.dataset.scenario!)));
+    qa.querySelector<HTMLSelectElement>('#debug-surface')!.add(new Option('光路（红：未找到出口；黄：反射未出水）','4'));
+    const temporalButton=document.createElement('button');temporalButton.textContent='静置稳定基准';
+    qa.querySelector('.qa-actions')!.append(temporalButton);
+    temporalButton.addEventListener('click',async()=>{
+      scene.setPaused(true);temporalButton.disabled=true;
+      try{const {validateTemporalSurface}=await import('./fluid/temporal-validation');opticsResult.textContent=JSON.stringify(validateTemporalSurface(scene.renderer),null,2);}
+      catch(error){opticsResult.textContent=String(error);}
+      finally{temporalButton.disabled=false;}
+    });
     qa.querySelector<HTMLSelectElement>('#debug-surface')!.addEventListener('change', event => scene.setDebug(Number((event.target as HTMLSelectElement).value)));
     const quality = qa.querySelector<HTMLSelectElement>('#quality')!;
     quality.value = scene.quality;
