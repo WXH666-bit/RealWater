@@ -1,4 +1,4 @@
-import { SURFACE_MIN_WEIGHT } from './surface-field';
+import { SURFACE_MIN_WEIGHT, BULK_SUPPORT } from './surface-field';
 import { backdropShader } from './backdrop';
 import { tankGeometry } from './tank-geometry';
 
@@ -16,6 +16,7 @@ uniform float uSupport;
 uniform float uSurfaceRadius;
 uniform float uDropRadius;
 uniform sampler2D uField;
+uniform sampler2D uFieldMetadata;
 uniform sampler2D uMoments;
 uniform sampler2D uSpread;
 uniform vec3 uCenter;
@@ -90,7 +91,7 @@ export const fieldFragment=fieldCommon+`
 out vec4 result;
 void main(){
   vec4 moment=texelFetch(uMoments,ivec2(gl_FragCoord.xy),0);
-  float spread=texelFetch(uSpread,ivec2(gl_FragCoord.xy),0).r;
+  vec2 spread=texelFetch(uSpread,ivec2(gl_FragCoord.xy),0).rg;
   vec3 local=uInverse*(voxelWorld(fieldCoord(gl_FragCoord.xy))-uCenter);
   // Mirror the particle neighborhood into the solid, only when reconstructing
   // the tank interior. This fills missing support at glass instead of rounding
@@ -114,7 +115,7 @@ void main(){
       vec3 delta=uInverse*ghost.xyz;
       for(int axis=0;axis<3;axis++)if((mask&(1<<axis))!=0)delta[axis]=-delta[axis];
       moment+=vec4(uRotation*delta,ghost.a);
-      spread+=sampleFieldTexture(uSpread,worldPoint).r;
+      spread+=sampleFieldTexture(uSpread,worldPoint).rg;
     }
   }
   // A wider neighborhood reconstructs the bulk wave instead of exposing each
@@ -123,12 +124,18 @@ void main(){
   float phi=moment.a>1e-5?length(moment.xyz/moment.a)*uSupport-radius:uSupport;
   // A mean position can lie in an empty gap between droplets. The second
   // moment rejects that false bridge, while dense bulk water stays smooth.
-  float rms=sqrt(max(spread/max(moment.a,1e-5),0.))*uSupport;
+  float rms=sqrt(max(spread.r/max(moment.a,1e-5),0.))*uSupport;
   float reach=mix(uDropRadius,uSupport,smoothstep(1.1,4.,moment.a));
   phi=max(phi,rms-reach);
   // Reject unsupported lobes between far-apart particles with tiny kernel tails.
   phi=max(phi,(${SURFACE_MIN_WEIGHT}-moment.a)*uDropRadius);
-  result=vec4(phi,0,0,1);
+  // Dense particle support is liquid even when an asymmetric centroid alone
+  // would invent an internal cavity. Sparse spray retains its original field.
+  float bulkPhi=uSurfaceRadius*(1.-moment.a/${BULK_SUPPORT}.);
+  phi=mix(phi,min(phi,bulkPhi),smoothstep(${BULK_SUPPORT-4}.,${BULK_SUPPORT}.,moment.a));
+  // Carry the same mirrored support into filtering and normal reconstruction.
+  // Otherwise a dense wetted wall is incorrectly classified as sparse spray.
+  result=vec4(phi,moment.a,sqrt(max(spread.g/max(moment.a,1e-5),0.)),1);
 }
 `;
 export const smoothFieldFragment=fieldCommon+`
@@ -138,8 +145,9 @@ uniform bool uHasHistory;
 out vec4 result;
 void main(){
   ivec3 q=fieldCoord(gl_FragCoord.xy);
-  float center=texelFetch(uField,fieldAtlas(q),0).r;
-  float dense=smoothstep(2.,10.,texelFetch(uMoments,fieldAtlas(q),0).a);
+  vec4 sampleValue=texelFetch(uField,fieldAtlas(q),0);
+  float center=sampleValue.r;
+  float dense=smoothstep(2.,10.,sampleValue.g);
   float sum=center*4.;
   for(int axis=0;axis<3;axis++)for(int sign=-1;sign<=1;sign+=2){
     ivec3 off=ivec3(0);off[axis]=sign;
@@ -175,7 +183,7 @@ void main(){
       float wx=x==0?6.:(abs(x)==1?4.:1.);
       float wz=z==0?6.:(abs(z)==1?4.:1.);
       // Exclude disconnected/sparse neighborhoods rather than bridging spray.
-      float supported=smoothstep(2.,10.,sampleFieldTexture(uMoments,samplePoint).a);
+      float supported=smoothstep(2.,10.,sampleFieldTexture(uField,samplePoint).g);
       float weight=wx*wz*supported;
       total+=value*weight;weightSum+=weight;
     }
@@ -184,13 +192,12 @@ void main(){
   // Only suppress temporal sampling noise in almost stationary dense water.
   // Moving waves and falling drops use the current field without history.
   // History uses simulated time, so batch tests and slow frames cannot freeze it.
-  float mass=texelFetch(uMoments,fieldAtlas(q),0).a;
-  float speed=sqrt(max(texelFetch(uSpread,fieldAtlas(q),0).g/max(mass,1e-5),0.));
+  float speed=sampleValue.b;
   float retention=exp(-uHistorySeconds/.10)*(1.-smoothstep(.04,.16,speed))*dense;
   float previous=texelFetch(uHistory,fieldAtlas(q),0).r;
   float agreement=1.-smoothstep(uVoxel*.25,uVoxel,abs(previous-filtered));
   if(uHasHistory)filtered=mix(filtered,previous,retention*agreement);
-  result=vec4(filtered,0,0,1);
+  result=vec4(filtered,sampleValue.gb,1);
 }
 `;
 
@@ -300,7 +307,7 @@ float normalFieldAt(vec3 point,bool mirror){
 }
 vec3 surfaceNormal(vec3 point){
   ivec3 cell=ivec3((point-uFieldOrigin)/uVoxel);
-  float dense=smoothstep(2.,10.,texelFetch(uMoments,fieldAtlas(cell),0).a);
+  float dense=smoothstep(2.,10.,texelFetch(uFieldMetadata,fieldAtlas(cell),0).g);
   float e=uVoxel*mix(.65,1.8,dense);
   // Differentiate the active surface of the intersection, not a wide stencil
   // through both water and glass. Blending their normals creates a rounded,
@@ -330,7 +337,9 @@ vec3 surfaceNormal(vec3 point){
 // The reconstruction is not a distance field inside; cap every step.
 bool waterExit(vec3 entry,vec3 direction,out vec3 exitPoint,out float distance){
   float previous=0.;distance=uVoxel*.02;bool entered=false;
-  for(int i=0;i<128;i++){
+  // At the highest quality the minimum step is 0.00861 world units. Allow
+  // enough steps to cross the tank diagonal even in a shallow implicit field.
+  for(int i=0;i<512;i++){
     float phi=fieldAt(entry+direction*distance);
     if(phi>=0.&&!entered){
       // Entry refinement and trilinear volume sampling have finite precision.
@@ -344,7 +353,14 @@ bool waterExit(vec3 entry,vec3 direction,out vec3 exitPoint,out float distance){
       for(int j=0;j<6;j++){float mid=(lo+hi)*.5;if(fieldAt(entry+direction*mid)<0.)lo=mid;else hi=mid;}
       distance=(lo+hi)*.5;exitPoint=entry+direction*distance;return true;
     }
-    entered=true;previous=distance;distance+=clamp(-phi*.75,uVoxel*.3,uVoxel*1.5);
+    // Tank clipping makes phi arbitrarily small along a wetted wall even when
+    // the ray is parallel to it. Using that value exhausted the march budget
+    // midway across quiet water and switched abruptly to fallback radiance.
+    // March by the liquid field; still detect exits with the clipped field.
+    // A step shorter than the glass thickness cannot skip the solid wall.
+    float liquidPhi=sampleFieldTexture(uField,entry+direction*distance).r;
+    entered=true;previous=distance;
+    distance+=clamp(-liquidPhi*.75,uVoxel*.3,min(uVoxel*1.5,wall));
   }
   exitPoint=entry+direction*distance;return false;
 }

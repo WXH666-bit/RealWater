@@ -34,6 +34,12 @@ describe('continuous liquid reconstruction',()=>{
     expect(liquid([0,0,0],[[-.5,0,0],[.5,0,0]])).toBeLessThan(0);
     expect(liquid([0,0,0],[[-2,0,0],[2,0,0]])).toBeGreaterThan(0);
   });
+  it('does not carve air around a marker in a dense asymmetric neighborhood',()=>{
+    const particles:number[][]=[[0,0,0]];
+    for(let i=0;i<64;i++)particles.push([1.4,(i%4-.5)*.05,(Math.floor(i/4)%4-.5)*.05]);
+    expect(liquid([0,0,0],particles)).toBeLessThan(0);
+    expect(liquid([5,0,0],particles)).toBeGreaterThan(0);
+  });
   it('breaks a stretched water ligament instead of gluing separated droplets together',()=>{
     expect(liquid([0,0,0],[[-.8,0,0],[.8,0,0]])).toBeLessThan(0);
     expect(liquid([0,0,0],[[-1.5,0,0],[1.5,0,0]])).toBeGreaterThan(0);

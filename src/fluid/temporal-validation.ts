@@ -5,7 +5,7 @@ import { smoothFieldFragment } from './implicit-shaders';
 /** Exercise the production filter over a sequence, not a single paused frame. */
 export function validateTemporalSurface(renderer:THREE.WebGLRenderer){
   const texture=(values:number[])=>{const t=new THREE.DataTexture(new Float32Array(values),1,1,THREE.RGBAFormat,THREE.FloatType);t.needsUpdate=true;return t;};
-  const field=texture([.02,0,0,1]),moments=texture([0,0,0,24]),spread=texture([0,0,0,0]);
+  const field=texture([.02,24,0,1]),moments=texture([0,0,0,24]),spread=texture([0,0,0,0]);
   let previous=new THREE.WebGLRenderTarget(1,1,{type:THREE.FloatType,depthBuffer:false});
   let next=previous.clone();
   const uniforms={uField:{value:field},uMoments:{value:moments},uSpread:{value:spread},uHistory:{value:previous.texture},
@@ -16,7 +16,7 @@ export function validateTemporalSurface(renderer:THREE.WebGLRenderer){
   const scene=new THREE.Scene(),camera=new THREE.Camera(),quad=new THREE.Mesh(geometry,material);quad.frustumCulled=false;scene.add(quad);
   const target=renderer.getRenderTarget(),autoClear=renderer.autoClear,read=new Float32Array(4);
   const step=(value:number,speed:number,hasHistory=true)=>{
-    field.image.data[0]=value;field.needsUpdate=true;spread.image.data[1]=24*speed*speed;spread.needsUpdate=true;
+    field.image.data[0]=value;field.image.data[2]=speed;field.needsUpdate=true;
     uniforms.uHistory.value=previous.texture;uniforms.uHasHistory.value=hasHistory;
     renderer.setRenderTarget(next);renderer.render(scene,camera);renderer.readRenderTargetPixels(next,0,0,1,1,read);
     [previous,next]=[next,previous];return read[0];

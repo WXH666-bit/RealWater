@@ -6,6 +6,10 @@ export const SURFACE_MIN_WEIGHT=.55;
 export const SURFACE_SUPPORT=3.5;
 export const SURFACE_RADIUS=.89;
 export const SPRAY_RADIUS=.65;
+// The poly6 support of a uniform lattice is about 27; a flat interface has
+// about half that support. Dense interior must not become air just because
+// marker crowding shifts the weighted centroid to one side.
+export const BULK_SUPPORT=16;
 
 /** Tiled slices avoid the maximum texture-width limit of a one-row atlas. */
 export function surfaceLayout(cell:number,quality:Quality){
@@ -35,5 +39,7 @@ export function referenceSurface(point:readonly number[],particles:readonly (rea
   const localRadius=dropRadius+(radius-dropRadius)*blend;
   const s=Math.max(0,Math.min(1,(total-1.1)/2.9));
   const reach=dropRadius+(support-dropRadius)*s*s*(3-2*s);
-  return Math.max(total>1e-5?Math.hypot(x,y,z)/total-localRadius:support,Math.sqrt(spread/Math.max(total,1e-5))-reach,(SURFACE_MIN_WEIGHT-total)*dropRadius);
+  const phi=Math.max(total>1e-5?Math.hypot(x,y,z)/total-localRadius:support,Math.sqrt(spread/Math.max(total,1e-5))-reach,(SURFACE_MIN_WEIGHT-total)*dropRadius);
+  const bulkT=Math.max(0,Math.min(1,(total-(BULK_SUPPORT-4))/4));
+  return phi+(Math.min(phi,radius*(1-total/BULK_SUPPORT))-phi)*bulkT*bulkT*(3-2*bulkT);
 }

@@ -44,7 +44,7 @@ export class FluidSurface {
     };
     this.moments=target(layout.width,layout.height,THREE.RGBAFormat,2);
     this.moments.textures[1].format=THREE.RGFormat;
-    this.field=target(layout.width,layout.height,THREE.RedFormat);
+    this.field=target(layout.width,layout.height);
     this.smooth=target(layout.width,layout.height,THREE.RedFormat);
     this.history=target(layout.width,layout.height,THREE.RedFormat);
     this.bounds=target(1,1);
@@ -57,7 +57,7 @@ export class FluidSurface {
       uVoxel:{value:layout.voxel},uColumns:{value:layout.columns},uFieldSize:{value:new THREE.Vector2(layout.width,layout.height)},
       uSupport:{value:layout.support},uSurfaceRadius:{value:layout.radius},uDropRadius:{value:layout.dropRadius},uSplatSize:{value:layers*2+1},uLayer:{value:0},
       uSpriteRadius:{value:layout.support},uOutsideOnly:{value:false},
-      uMoments:{value:this.moments.textures[0]},uSpread:{value:this.moments.textures[1]},uField:{value:this.field.texture},uBounds:{value:this.bounds.texture},
+      uMoments:{value:this.moments.textures[0]},uSpread:{value:this.moments.textures[1]},uField:{value:this.field.texture},uFieldMetadata:{value:this.field.texture},uBounds:{value:this.bounds.texture},
       uBackground:{value:null},uResolution:{value:new THREE.Vector2(1,1)},uHeight:{value:1},
       uInverseProjection:{value:new THREE.Matrix4()},uCameraWorld:{value:new THREE.Matrix4()},uViewProjection:{value:new THREE.Matrix4()},uCameraPosition:{value:new THREE.Vector3()},uDebug:{value:0},
     };
@@ -137,11 +137,12 @@ export class FluidSurface {
   inspectNormals(points:THREE.Vector3[]){
     return this.inspectGeometry(points).map(value=>new THREE.Vector3(value[1],value[2],value[3]));
   }
-  private inspectGeometry(points:THREE.Vector3[]){
-    const probeUniforms={...this.uniforms,uProbe:{value:new THREE.Vector3()}};
+  inspectSupport(points:THREE.Vector3[]){return this.inspectGeometry(points,true);}
+  private inspectGeometry(points:THREE.Vector3[],metadata=false){
+    const probeUniforms={...this.uniforms,uProbe:{value:new THREE.Vector3()},uInspectMetadata:{value:metadata}};
     const material=new THREE.RawShaderMaterial({vertexShader:fullscreenVertex,fragmentShader:shader.fieldCommon+shader.surfaceTracing+`
-      uniform vec3 uProbe;out vec4 result;
-      void main(){result=vec4(fieldAt(uProbe),surfaceNormal(uProbe));}
+      uniform vec3 uProbe;uniform bool uInspectMetadata;out vec4 result;
+      void main(){vec4 metadata=sampleFieldTexture(uFieldMetadata,uProbe);result=uInspectMetadata?vec4(fieldAt(uProbe),metadata.gb,metadata.r):vec4(fieldAt(uProbe),surfaceNormal(uProbe));}
     `,uniforms:probeUniforms,glslVersion:THREE.GLSL3,depthTest:false,depthWrite:false});
     const target=new THREE.WebGLRenderTarget(1,1,{type:THREE.FloatType,depthBuffer:false});
     const previousTarget=this.renderer.getRenderTarget(),previousMaterial=this.quad.material;

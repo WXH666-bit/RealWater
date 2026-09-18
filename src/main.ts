@@ -51,6 +51,9 @@ async function start() {
     const settleButton=document.createElement('button');settleButton.textContent='摇晃后静置';
     qa.querySelector('.qa-actions')!.append(settleButton);
     settleButton.addEventListener('click',()=>scene.startScenario('settle'));
+    const longSettleButton=document.createElement('button');longSettleButton.textContent='长时静置恢复';
+    qa.querySelector('.qa-actions')!.append(longSettleButton);
+    longSettleButton.addEventListener('click',()=>scene.startScenario('settle-long'));
     const hydroButton=document.createElement('button');hydroButton.textContent='静水压力基准';
     qa.querySelector('.qa-actions')!.append(hydroButton);
     hydroButton.addEventListener('click',async()=>{
