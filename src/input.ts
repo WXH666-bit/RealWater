@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { clamp, MAX_TILT, type Mode } from './config';
+import { clamp, MAX_TILT, TANK, WALL, type Mode } from './config';
 import type { WaterScene } from './scene';
 import { movementForView, tiltForView } from './view-controls';
 
@@ -13,15 +13,17 @@ export class WaterInput {
   private start:{x:number;y:number;tx:number;tz:number;rx:number;rz:number;time:number;touch:boolean;moved:boolean;pouring:boolean;point:THREE.Vector3|null;shift:boolean;orbit:boolean;view:THREE.Quaternion}|null=null;
   private dual:{x:number;y:number;distance:number;camera:THREE.Vector3;rx:number;rz:number;tx:number;tz:number;kind:'tilt'|'pinch'|null}|null=null;
   private pourTimer=0;
-  private lastTap={time:0,x:0,y:0};
+  private lastTap={time:-Infinity,x:0,y:0};
   private raycaster=new THREE.Raycaster();
-  private tankBounds=new THREE.Box3(new THREE.Vector3(-1.12,-.84,-.77),new THREE.Vector3(1.12,.72,.77));
+  private tankBounds=new THREE.Box3(TANK.clone().addScalar(2*WALL).negate(),TANK.clone().add(new THREE.Vector3(2*WALL,0,2*WALL)));
   private plane=new THREE.Plane();
   private target=new THREE.Vector3();
   private lastSensor=0;
   private sensorOrigin:{beta:number;gamma:number}|null=null;
   private sensorTimer=0;
   private calibrationPending=false;
+  private motionRequest=0;
+  private motionPending=false;
   private abort=new AbortController();
   constructor(private scene:WaterScene,private notify:(message:string)=>void){
     const canvas=scene.canvas;const options={signal:this.abort.signal};
@@ -63,12 +65,12 @@ export class WaterInput {
   };
   private waterPoint(x:number,y:number){
     this.screenRay(x,y);
-    const opening=new THREE.Vector3(0,.72,0).applyQuaternion(this.scene.quaternion).add(this.scene.position);
+    const opening=new THREE.Vector3(0,TANK.y,0).applyQuaternion(this.scene.quaternion).add(this.scene.position);
     this.plane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0,1,0).applyQuaternion(this.scene.quaternion),opening);
     const hit=this.raycaster.ray.intersectPlane(this.plane,this.target);
     if(!hit)return null;
     const local=hit.clone().sub(this.scene.position).applyQuaternion(this.scene.quaternion.clone().invert());
-    if(Math.abs(local.x)>1||Math.abs(local.z)>.65)return null;
+    if(Math.abs(local.x)>TANK.x||Math.abs(local.z)>TANK.z)return null;
     return hit.clone().add(new THREE.Vector3(0,.5+this.scene.dropRadius,0));
   }
   private down=(e:PointerEvent)=>{
@@ -112,7 +114,7 @@ export class WaterInput {
     if(!this.start||this.pointers.size!==1||!this.pointers.has(e.pointerId)||(this.scene.paused&&!this.start.orbit))return;
     if(Math.hypot(e.clientX-this.start.x,e.clientY-this.start.y)>5){
       this.start.moved=true;window.clearTimeout(this.pourTimer);
-      if(this.mode!=='drop'){this.scene.stopPour();if(this.motionEnabled&&!this.start.orbit)this.disableMotion();}
+      if(this.mode!=='drop'){this.scene.stopPour();if((this.motionEnabled||this.motionPending)&&!this.start.orbit)this.disableMotion();}
     }
     if(!this.start.moved)return;
     if(this.start.orbit)return;
@@ -126,17 +128,17 @@ export class WaterInput {
       const rotation=tiltForView(this.start.view,dx*3.7,dy*3.7);
       this.scene.setPose(this.start.tx,this.start.tz,this.start.rx+rotation.x,this.start.rz+rotation.z);
     }
-    else{const point=this.waterPoint(e.clientX,e.clientY);if(point){if(!this.start.pouring){this.scene.startPour(point);this.start.pouring=true;}else this.scene.updatePour(point);}else this.scene.stopPour();}
+    else{const point=this.waterPoint(e.clientX,e.clientY);if(point){if(!this.start.pouring){this.scene.startPour(point);this.start.pouring=true;}else this.scene.updatePour(point);}else{this.scene.stopPour();this.start.pouring=false;}}
   };
   private up=(e:PointerEvent)=>{
     const start=this.start;
     window.clearTimeout(this.pourTimer);
     if(start&&!start.moved&&!this.dual&&!this.scene.paused){
       if(start.point&&!start.pouring)this.scene.emitWater(start.point);
-      else if(!start.point){
+      else if(!start.point&&!this.hitsTank(start.x,start.y)&&!this.hitsTank(e.clientX,e.clientY)){
         const now=performance.now();
         if(start.touch&&now-start.time>700)void this.toggleMotion();
-        else if(now-this.lastTap.time<320&&Math.hypot(e.clientX-this.lastTap.x,e.clientY-this.lastTap.y)<22){this.disableMotion();this.scene.reset();this.lastTap.time=0;}
+        else if(now-this.lastTap.time<320&&Math.hypot(e.clientX-this.lastTap.x,e.clientY-this.lastTap.y)<22){this.disableMotion();this.scene.reset();this.lastTap.time=-Infinity;}
         else this.lastTap={time:now,x:e.clientX,y:e.clientY};
       }
     }
@@ -160,21 +162,28 @@ export class WaterInput {
     }
   };
   async toggleMotion(){
-    if(this.motionEnabled){this.disableMotion();return;}
+    if(this.abort.signal.aborted)return;
+    if(this.motionEnabled||this.motionPending){this.disableMotion();return;}
     if(!window.isSecureContext){this.notify('手机体感需要 HTTPS 安全连接。当前仍可使用触屏操作，配置步骤见 README。');return;}
     if(!('DeviceOrientationEvent' in window)){this.notify('此设备没有可用的方向传感器，请使用触屏操作。');return;}
+    const request=++this.motionRequest;
+    this.motionPending=true;
     try{
       const orientation=DeviceOrientationEvent as unknown as PermissionEvent;
       const motion=typeof DeviceMotionEvent==='undefined'?undefined:DeviceMotionEvent as unknown as PermissionEvent;
       // Both requests are initiated in the original user activation before awaiting.
       const results=await Promise.all([orientation.requestPermission?.()??Promise.resolve('granted'),motion?.requestPermission?.()??Promise.resolve('granted')]);
+      if(request!==this.motionRequest||this.abort.signal.aborted)return;
       if(results.some(v=>v!=='granted')){this.notify('未获得体感权限，触屏操作不受影响。');return;}
       this.motionEnabled=true;this.calibrationPending=true;this.sensorOrigin=null;this.lastSensor=0;
       window.addEventListener('deviceorientation',this.orientation);
       window.addEventListener('devicemotion',this.motion);
       this.sensorTimer=window.setTimeout(()=>{if(!this.lastSensor){this.disableMotion();this.notify('没有收到传感器数据，请使用触屏操作。');}},3500);
       this.notify('体感已开启。保持当前姿势作为正立方向，再轻轻倾斜手机。');this.onMotionChange?.();
-    }catch{this.disableMotion();this.notify('无法开启体感，仍可使用触屏操作。');}
+    }catch{
+      if(request!==this.motionRequest||this.abort.signal.aborted)return;
+      this.disableMotion();this.notify('无法开启体感，仍可使用触屏操作。');
+    }finally{if(request===this.motionRequest)this.motionPending=false;}
   }
   private orientation=(event:DeviceOrientationEvent)=>{
     if(document.hidden||event.beta===null||event.gamma===null||!Number.isFinite(event.beta+event.gamma))return;
@@ -197,6 +206,7 @@ export class WaterInput {
     this.scene.setPose(p.x*.9+movement.x,p.z*.9+movement.z);
   };
   disableMotion(){
+    this.motionRequest++;this.motionPending=false;
     this.motionEnabled=false;window.clearTimeout(this.sensorTimer);
     window.removeEventListener('deviceorientation',this.orientation);window.removeEventListener('devicemotion',this.motion);this.onMotionChange?.();
   }

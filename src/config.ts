@@ -2,19 +2,31 @@ import { Vector3 } from 'three';
 
 export type Quality = 'low' | 'medium' | 'high';
 export type Mode = 'move' | 'tilt' | 'drop';
-export const TANK = new Vector3(1, 0.72, 0.65);
+export const TANK = new Vector3(1.3, 0.72, 0.65);
 export const WALL = 0.06;
+export const TANK_TRAVEL = new Vector3(.75, 0, .5);
+export const TANK_REACH = TANK.clone().addScalar(2 * WALL).length();
+export function physicsGrid(cell:number, baseline:readonly number[]):[number,number,number] {
+  // Grow by whole cells on BOTH sides, retaining the established wall/grid alignment.
+  return baseline.map((n,i)=>n+2*Math.max(0,Math.ceil((2*(TANK_REACH+TANK_TRAVEL.getComponent(i)+2*cell)/cell-n)/2))) as [number,number,number];
+}
+export function gridLayout(grid:readonly number[]) {
+  const columns=Math.min(grid[2],Math.floor(4096/grid[0]));
+  return {columns,width:grid[0]*columns,height:grid[1]*Math.ceil(grid[2]/columns)};
+}
 export const MAX_TILT = 85 * Math.PI / 180;
 export const FIXED_DT = 1 / 90;
-// A two-unit tank represents a 40 cm tabletop aquarium, not a two-metre pool.
+// One scene unit represents 20 cm; the widened aquarium is 52 cm across.
 export const METERS_PER_UNIT = 0.2;
 export const GRAVITY = 9.81 / METERS_PER_UNIT;
 export const PROFILES = {
+  // Weighted Float32 pressure needs enough iterations to settle after motion;
+  // the previous 30/42 iterations left a measurable bulk-height drift.
   // Low quality reduces reconstruction/pixel cost, not the minimum physics
   // accuracy: coarser grids introduced wall-dependent volume drift at rest.
-  low: { cell: 0.105, grid: [54, 46, 40], pressure: 30, scale: 0.7, capacity: 32768 },
-  medium: { cell: 0.105, grid: [54, 46, 40], pressure: 30, scale: 0.85, capacity: 32768 },
-  high: { cell: 0.082, grid: [68, 58, 52], pressure: 42, scale: 1, capacity: 65536 },
+  low: { cell: 0.105, grid: physicsGrid(.105,[54,46,40]), pressure: 60, scale: 0.7, capacity: 32768 },
+  medium: { cell: 0.105, grid: physicsGrid(.105,[54,46,40]), pressure: 60, scale: 0.85, capacity: 32768 },
+  high: { cell: 0.082, grid: physicsGrid(.082,[68,58,52]), pressure: 84, scale: 1, capacity: 65536 },
 } as const;
 
 export function clamp(value: number, min: number, max: number) {

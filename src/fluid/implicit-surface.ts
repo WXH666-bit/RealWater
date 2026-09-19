@@ -4,6 +4,7 @@ import { fullscreenVertex } from './shaders';
 import { surfaceLayout } from './surface-field';
 import * as shader from './implicit-shaders';
 import { FIXED_DT } from '../config';
+import type {AquariumSystem} from '../aquarium';
 
 /** GPU volume reconstruction followed by ray/isosurface intersection.
  * The visible geometry is a world-space surface, not camera-facing particles. */
@@ -59,6 +60,7 @@ export class FluidSurface {
       uSpriteRadius:{value:layout.support},uOutsideOnly:{value:false},
       uMoments:{value:this.moments.textures[0]},uSpread:{value:this.moments.textures[1]},uField:{value:this.field.texture},uFieldMetadata:{value:this.field.texture},uBounds:{value:this.bounds.texture},
       uBackground:{value:null},uResolution:{value:new THREE.Vector2(1,1)},uHeight:{value:1},
+      uFishPosition:{value:null},uFishVelocity:{value:null},uFishHeading:{value:null},uFishCount:{value:0},
       uInverseProjection:{value:new THREE.Matrix4()},uCameraWorld:{value:new THREE.Matrix4()},uViewProjection:{value:new THREE.Matrix4()},uCameraPosition:{value:new THREE.Vector3()},uDebug:{value:0},
     };
     const material=(vertexShader:string,fragmentShader:string)=>{
@@ -71,6 +73,7 @@ export class FluidSurface {
     this.boundsMaterial=material(shader.boundVertex,shader.boundFragment);
     this.boundsMaterial.blending=THREE.CustomBlending;this.boundsMaterial.blendSrc=THREE.OneFactor;this.boundsMaterial.blendDst=THREE.OneFactor;this.boundsMaterial.blendEquation=THREE.MaxEquation;
     this.rayMaterial=material(fullscreenVertex,shader.rayFragment);
+    this.rayMaterial.defines={AQUARIUM:1};
     this.rayMaterial.depthWrite=true;this.rayMaterial.depthTest=true;this.rayMaterial.depthFunc=THREE.AlwaysDepth;
     this.sprayMaterial=material(shader.boundVertex,shader.sprayFragment);this.sprayMaterial.depthTest=true;this.sprayMaterial.depthWrite=true;
     const points=new THREE.BufferGeometry();points.setAttribute('position',new THREE.BufferAttribute(new Float32Array(solver.stats.capacity*3),3));
@@ -89,10 +92,10 @@ export class FluidSurface {
     const material=new THREE.RawShaderMaterial({vertexShader:fullscreenVertex,fragmentShader:shader.fieldCommon+`
       out vec4 result;
       void main(){
-        vec2 xz=(gl_FragCoord.xy-.5)/vec2(32,18)*vec2(1.6,.9)-vec2(.8,.45);
-        float above=.65;
+        vec2 xz=((gl_FragCoord.xy-.5)/vec2(32,18)*2.-1.)*tank.xz*.7;
+        float above=tank.y-.07;
         for(int i=1;i<=96;i++){
-          float below=.65-float(i)*1.36/96.;
+          float below=tank.y-.07-float(i)*(2.*tank.y-.08)/96.;
           if(fieldAt(vec3(xz.x,below,xz.y))<0.){
             for(int j=0;j<12;j++){
               float mid=(above+below)*.5;
@@ -156,15 +159,17 @@ export class FluidSurface {
       });
     }finally{this.quad.material=previousMaterial;this.renderer.setRenderTarget(previousTarget);target.dispose();material.dispose();}
   }
-  render(camera:THREE.PerspectiveCamera,background:THREE.Texture){
+  render(camera:THREE.PerspectiveCamera,background:THREE.Texture,aquarium?:AquariumSystem){
     const r=this.renderer,u=this.uniforms;r.autoClear=false;r.setClearColor(0,0);
+    u.uFishCount.value=aquarium?.count??0;
+    if(aquarium){const textures=aquarium.textures;u.uFishPosition.value=textures[0];u.uFishVelocity.value=textures[1];u.uFishHeading.value=textures[2];}
     const gl=r.getContext() as WebGL2RenderingContext,timer=this.timerExtension;
     if(timer&&this.timerQuery&&gl.getQueryParameter(this.timerQuery,gl.QUERY_RESULT_AVAILABLE)){
       if(!gl.getParameter(timer.GPU_DISJOINT_EXT))this.gpuMilliseconds=gl.getQueryParameter(this.timerQuery,gl.QUERY_RESULT)/1e6;
       gl.deleteQuery(this.timerQuery);this.timerQuery=null;
     }
     let timeRender=false;
-    if(timer&&!this.timerQuery&&performance.now()>this.nextTiming){
+    if(timer&&!this.timerQuery&&performance.now()>this.nextTiming&&!gl.getQuery(timer.TIME_ELAPSED_EXT,gl.CURRENT_QUERY)){
       this.timerQuery=gl.createQuery();
       if(this.timerQuery){gl.beginQuery(timer.TIME_ELAPSED_EXT,this.timerQuery);timeRender=true;}
       this.nextTiming=performance.now()+1000;

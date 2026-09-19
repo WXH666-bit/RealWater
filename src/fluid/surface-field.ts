@@ -1,4 +1,4 @@
-import type { Quality } from '../config';
+import {TANK_REACH,TANK_TRAVEL,type Quality} from '../config';
 
 // A dilute gap must break into droplets instead of forming a sticky bridge.
 // At the isolated particle's true radius the kernel weight is still about .8.
@@ -18,8 +18,9 @@ export function surfaceLayout(cell:number,quality:Quality){
   // Cover the complete moving/tilting tank and nearby splashes. More distant
   // particles use the sphere-intersection spray pass; no particles are deleted.
   // Avoid spending half the reconstruction bandwidth on permanently empty air.
-  const origin:[number,number,number]=[-2.8,-3,-2.4];
-  const grid:[number,number,number]=[Math.ceil(5.6/voxel),Math.ceil(5.4/voxel),Math.ceil(4.8/voxel)];
+  const extent=[Math.max(2.8,TANK_REACH+TANK_TRAVEL.x+.3),3,Math.max(2.4,TANK_REACH+TANK_TRAVEL.z+.3)];
+  const origin=extent.map(n=>-n) as [number,number,number];
+  const grid=extent.map(n=>Math.ceil(2*n/voxel)) as [number,number,number];
   const columns=Math.ceil(Math.sqrt(grid[2]));
   return {voxel,origin,grid,columns,width:columns*grid[0],height:Math.ceil(grid[2]/columns)*grid[1],support:spacing*SURFACE_SUPPORT,radius:spacing*SURFACE_RADIUS,dropRadius:spacing*SPRAY_RADIUS};
 }

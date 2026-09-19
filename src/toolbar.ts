@@ -1,6 +1,7 @@
 import type { WaterScene } from './scene';
 import type { WaterInput } from './input';
 import type { Quality } from './config';
+import {FISH_KINDS,FISH_NAMES,FISH_LIMIT} from './aquarium';
 
 const paths={
   move:'M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3',
@@ -37,6 +38,16 @@ export class WaterToolbar {
         </div>
       </div>
       <div class="tool-secondary">
+        <details class="tool-settings aquarium-menu">
+          <summary title="添加小鱼，打造自己的水族馆"><span>生物</span></summary>
+          <div class="settings-popover aquarium-popover">
+            <div class="aquarium-heading"><strong>小小水族馆</strong><output id="fish-count" aria-live="polite">0 / 12</output></div>
+            <p class="aquarium-intro">添一位水下住客，看它自在游动。</p>
+            ${FISH_KINDS.map(kind=>`<button type="button" data-fish="${kind}" aria-label="添加${FISH_NAMES[kind]}"><span class="fish-preview ${kind}" aria-hidden="true"></span><span>${FISH_NAMES[kind]}</span><span class="fish-add" aria-hidden="true">＋</span></button>`).join('')}
+            <button type="button" data-action="clear-fish">清空生物</button>
+            <p>重置会保留小鱼。水域不足时，小鱼会自动收回。</p>
+          </div>
+        </details>
         <button type="button" data-action="motion" aria-pressed="false" title="开启手机体感并以当前姿势校准">${icon('motion')}<span>体感</span></button>
         <details class="tool-settings">
           <summary title="水滴大小、画质和操作说明">${icon('settings')}<span>设置</span></summary>
@@ -52,6 +63,8 @@ export class WaterToolbar {
       </div>`;
     host.append(el);
     const options={signal:this.abort.signal};
+    FISH_KINDS.forEach(kind=>el.querySelector<HTMLButtonElement>(`[data-fish="${kind}"]`)!.addEventListener('click',()=>scene.addFish(kind),options));
+    this.button('clear-fish').addEventListener('click',()=>{scene.clearFish();notify('已清空生物');},options);
     el.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach(button=>button.addEventListener('click',()=>{
       input.setMode(button.dataset.mode as WaterInput['mode']);
     },options));
@@ -66,14 +79,20 @@ export class WaterToolbar {
     el.querySelector<HTMLSelectElement>('#render-quality')!.addEventListener('change',event=>{
       scene.setQuality((event.target as HTMLSelectElement).value as Quality);this.update();
     },options);
-    const details=el.querySelector<HTMLDetailsElement>('details')!;
-    document.addEventListener('pointerdown',event=>{if(!details.contains(event.target as Node))details.open=false;},options);
-    el.addEventListener('keydown',event=>{if(event.key==='Escape'&&details.open){details.open=false;details.querySelector('summary')!.focus();event.stopPropagation();}},options);
+    const panels=Array.from(el.querySelectorAll<HTMLDetailsElement>('details'));
+    document.addEventListener('pointerdown',event=>{panels.forEach(details=>{if(!details.contains(event.target as Node))details.open=false;});},options);
+    panels.forEach(details=>{
+      details.addEventListener('toggle',()=>{if(details.open)panels.forEach(other=>{if(other!==details)other.open=false;});},options);
+      details.addEventListener('keydown',event=>{if(event.key==='Escape'&&details.open){details.open=false;details.querySelector('summary')!.focus();event.stopPropagation();}},options);
+    });
     this.update();
   }
   private button(name:string){return this.element.querySelector<HTMLButtonElement>(`[data-action="${name}"]`)!;}
   update=()=>{
     const {scene,input}=this;
+    this.element.querySelector('#fish-count')!.textContent=`${scene.fishCount} / ${FISH_LIMIT}`;
+    this.element.querySelectorAll<HTMLButtonElement>('[data-fish]').forEach(button=>{button.disabled=scene.fishCount>=FISH_LIMIT;});
+    this.button('clear-fish').disabled=scene.fishCount===0;
     this.element.querySelectorAll<HTMLButtonElement>('[data-mode]').forEach(button=>{
       button.setAttribute('aria-pressed',String(button.dataset.mode===(input.mode==='move'?'auto':input.mode)));
     });
@@ -84,7 +103,7 @@ export class WaterToolbar {
     toggle('motion',input.motionEnabled,input.motionEnabled?'关闭体感':'体感');
     this.button('drop').disabled=scene.paused;this.button('pour').disabled=scene.paused;
     this.element.querySelector<HTMLInputElement>('#drop-size')!.value=String(scene.dropRadius);
-    this.element.querySelector('output')!.textContent=scene.dropRadius<.1?'小':scene.dropRadius>.135?'大':'中';
+    this.element.querySelector('#drop-size-value')!.textContent=scene.dropRadius<.1?'小':scene.dropRadius>.135?'大':'中';
     this.element.querySelector<HTMLSelectElement>('#render-quality')!.value=scene.pendingQuality??scene.quality;
     const note=this.element.querySelector<HTMLParagraphElement>('.quality-note')!;
     note.hidden=!scene.pendingQuality;note.textContent=scene.pendingQuality?'点击「重置」后应用新画质。':'';

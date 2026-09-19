@@ -1,10 +1,10 @@
 import * as THREE from 'three';
-import { FIXED_DT, GRAVITY, PROFILES, initialParticles, randomSequence, type Quality } from '../config';
+import { FIXED_DT, GRAVITY, PROFILES, TANK, gridLayout, initialParticles, randomSequence, type Quality } from '../config';
 import * as shader from './shaders';
 import { dropOffsets, dropParticleCount } from './emission';
 
 type Uniforms = Record<string, THREE.IUniform>;
-export interface FluidStats { active: number; initial: number; injected: number; exited: number; capacity: number; invalid: number; minY: number; maxY: number; meanY: number; meanX:number; rmsSpeed:number; }
+export interface FluidStats { active: number; initial: number; injected: number; exited: number; capacity: number; invalid: number; minY: number; maxY: number; meanY: number; meanX:number; rmsSpeed:number; motionRmsSpeed:number; }
 
 export class FluidSolver {
   readonly profile;
@@ -45,6 +45,8 @@ export class FluidSolver {
   private invalidIds = new Set<number>();
   private invalidTotal = 0;
   private readback: Float32Array;
+  private inspectedPositions:Float32Array;
+  private inspectedRevision=0;
   private random = randomSequence(2026);
   private splatGeometry: THREE.BufferGeometry;
   private previousPosition = new THREE.Vector3();
@@ -59,13 +61,14 @@ export class FluidSolver {
     const initial = initialParticles(this.profile.cell, cap);
     this.radius = initial.spacing * 0.94;
     this.markerVolume=initial.markerVolume;
-    this.stats = { active: initial.count, initial: initial.count, injected: 0, exited: 0, capacity: cap, invalid: 0, minY: -.72, maxY: 0, meanY: -.36, meanX:0, rmsSpeed:0 };
+    this.stats = { active: initial.count, initial: initial.count, injected: 0, exited: 0, capacity: cap, invalid: 0, minY: -TANK.y, maxY: 0, meanY: -TANK.y/2, meanX:0, rmsSpeed:0, motionRmsSpeed:0 };
     this.readback = new Float32Array(cap * 4);
+    this.inspectedPositions=initial.positions.slice();
     this.seedData = new Float32Array(cap * 4);
     for (let i = cap - 1; i >= initial.count; i--) this.free.push(i);
     this.seeds = this.dataTexture(this.seedData);
     const grid = new THREE.Vector3(...this.profile.grid).addScalar(1);
-    const origin = new THREE.Vector3(-grid.x * this.profile.cell / 2, -2.65, -grid.z * this.profile.cell / 2);
+    const origin = grid.clone().multiplyScalar(-this.profile.cell/2);origin.y=-2.65;
     this.uniforms = {
       uGrid: { value: grid }, uOrigin: { value: origin }, uCell: { value: this.profile.cell },
       uDt: { value: FIXED_DT }, uRadius: { value: this.radius }, uCenter: { value: new THREE.Vector3() },
@@ -100,18 +103,20 @@ export class FluidSolver {
     const points = new THREE.Points(this.splatGeometry, splat);
     points.frustumCulled = false;
     this.splatScene.add(points);
-    const w = grid.x * grid.z, h = grid.y;
+    const {width:w,height:h}=gridLayout(grid.toArray());
     this.accum = this.target(w, h, 2, THREE.HalfFloatType, THREE.LinearFilter);
-    this.original = this.target(w, h, 1, THREE.HalfFloatType, THREE.LinearFilter);
-    this.originalNext = this.target(w, h, 1, THREE.HalfFloatType, THREE.LinearFilter);
-    this.forced = this.target(w, h, 1, THREE.HalfFloatType, THREE.LinearFilter);
-    this.projected = this.target(w, h, 1, THREE.HalfFloatType, THREE.LinearFilter);
-    this.projectedNext = this.target(w, h, 1, THREE.HalfFloatType, THREE.LinearFilter);
-    this.divergence = this.target(w, h);
+    // Keep accumulation half-float (no EXT_float_blend dependency), but avoid
+    // quantizing the gravity/pressure cancellation and velocity extrapolation.
+    this.original = this.target(w, h, 1, THREE.FloatType, THREE.NearestFilter);
+    this.originalNext = this.target(w, h, 1, THREE.FloatType, THREE.NearestFilter);
+    this.forced = this.target(w, h, 1, THREE.FloatType, THREE.NearestFilter);
+    this.projected = this.target(w, h, 1, THREE.FloatType, THREE.NearestFilter);
+    this.projectedNext = this.target(w, h, 1, THREE.FloatType, THREE.NearestFilter);
+    this.divergence = this.target(w, h, 1, THREE.FloatType);
     this.boundary = this.target(w,h);
     this.uniforms.uBoundary.value=this.boundary.texture;
-    this.pressure = this.target(w, h);
-    this.pressureNext = this.target(w, h);
+    this.pressure = this.target(w, h, 1, THREE.FloatType);
+    this.pressureNext = this.target(w, h, 1, THREE.FloatType);
     this.particles = this.target(this.particleSize.x, this.particleSize.y, 2, THREE.FloatType);
     this.particlesNext = this.target(this.particleSize.x, this.particleSize.y, 2, THREE.FloatType);
     this.affine=this.target(this.particleSize.x,this.particleSize.y,3);
@@ -297,7 +302,7 @@ export class FluidSolver {
             float open=at(uBoundary,q)[axis];
             if(open>0.&&(fluid(q)||fluid(q-off))){a+=open*before[axis]*before[axis];b+=open*after[axis]*after[axis];weight+=open;}
           }
-          result=vec4(a,b,weight,fluid(q)?max(at(uWeights,q).a-uRestDensity,0.)*.35:0.);return;
+          result=vec4(a,b,weight,fluid(q)?volumeSource(q):0.);return;
         }
         ivec3 q=coord();if(!fluid(q)){result=vec4(0);return;}
         float sum=0.,n=0.;
@@ -328,7 +333,8 @@ export class FluidSolver {
       return {fluidCells:count,rmsResidual:Math.sqrt(error/Math.max(count,1)),relativeResidual:Math.sqrt(error/Math.max(rhs,1e-20)),maxResidual:max,preProjectionRms:Math.sqrt(before/Math.max(weight,1)),postProjectionRms:Math.sqrt(after/Math.max(weight,1)),crowdingSourceTotal:crowding};
     }finally{this.quad.material=previousMaterial;this.renderer.setRenderTarget(previousTarget);material.dispose();target.dispose();}
   }
-  /** Compare projected face flux with the velocity actually used to move markers. */
+  /** Compare momentum interpolation with the face flux used for transport.
+   * Position regularization is additionally covered by motionRmsSpeed. */
   inspectTransport(){
     const material=this.material(shader.fullscreenVertex,shader.common+`
       out vec4 result;
@@ -393,6 +399,18 @@ export class FluidSolver {
     this.stats.minY=active?minY:0;this.stats.maxY=active?maxY:0;this.stats.meanY=active?sumY/active:0;
     this.stats.meanX=active?sumX/active:0;
     this.stats.exited = this.stats.initial + this.stats.injected - active - this.invalidTotal;
+    // Include position regularization in the observed motion, not only the
+    // stored momentum. Reuse the position readback already needed for counts.
+    const elapsed=(this.revision-this.inspectedRevision)*FIXED_DT;
+    if(elapsed>0){
+      let squared=0,count=0;
+      for(let i=0;i<this.readback.length;i+=4)if(this.readback[i+3]>.5&&this.inspectedPositions[i+3]>.5){
+        for(let axis=0;axis<3;axis++)squared+=(this.readback[i+axis]-this.inspectedPositions[i+axis])**2;
+        count++;
+      }
+      this.stats.motionRmsSpeed=Math.sqrt(squared/Math.max(count,1))/elapsed;
+      this.inspectedPositions.set(this.readback);this.inspectedRevision=this.revision;
+    }
     this.renderer.readRenderTargetPixels(this.particles, 0, 0, this.particleSize.x, this.particleSize.y, this.readback, 0, 1);
     let speedSquared=0;
     for(let i=0;i<this.stats.capacity;i++)if(this.readback[i*4+3]>.5){const x=this.readback[i*4],y=this.readback[i*4+1],z=this.readback[i*4+2];speedSquared+=x*x+y*y+z*z;}

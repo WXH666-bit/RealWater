@@ -45,7 +45,9 @@ export function validateFreeSurfacePressure(renderer:THREE.WebGLRenderer){
       checks.push({precision:type===THREE.HalfFloatType?'float16':'float32',fraction,pressureError,maxSpeed,pass:pressureError<tolerance&&maxSpeed<tolerance});
     }
     }
-    return {passed:checks.every(c=>c.pass),checks};
+    // Production now uses Float32 pressure. Keep Float16 as an explicitly
+    // non-production comparison, without loosening its original tolerance.
+    return {passed:checks.filter(c=>c.precision==='float32').every(c=>c.pass),productionPrecision:'float32',checks};
   }finally{
     renderer.setRenderTarget(oldTarget);renderer.autoClear=oldClear;renderer.setClearColor(oldColor,oldAlpha);
     textures.forEach(t=>t.dispose());targets.forEach(t=>t.dispose());geometry.dispose();solve.dispose();project.dispose();

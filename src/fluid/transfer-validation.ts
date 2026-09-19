@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import {FIXED_DT} from '../config';
 import {affineFragment,fullscreenVertex,splatVertex,splatFragment} from './shaders';
 
 /** Exercise the actual GPU APIC gradient and scatter shaders against analytic
@@ -16,6 +17,7 @@ export function validateTransfers(renderer:THREE.WebGLRenderer){
   const velocity=texture(new Float32Array(width*height*4),width,height);
   const uniforms:Record<string,THREE.IUniform>={
     uGrid:{value:new THREE.Vector3(grid,grid,grid)},uOrigin:{value:new THREE.Vector3()},uCell:{value:1},
+    uDt:{value:0},
     uParticleSize:{value:new THREE.Vector2(points.length,1)},uPositions:{value:texture(positions,points.length,1)},
     uSeeds:{value:texture(new Float32Array(positions.length),points.length,1)},uGridVelocity:{value:velocity},
     uVelocities:{value:null},uInjectOnly:{value:false},uLayer:{value:0},
@@ -40,7 +42,11 @@ export function validateTransfers(renderer:THREE.WebGLRenderer){
   const results=[];
   try{
     renderer.autoClear=false;renderer.setClearColor(0,0);
-    for(const fixture of fixtures){
+    for(const fixture of fixtures)for(const dt of [0,FIXED_DT]){
+      uniforms.uDt.value=dt;
+      // The damped case uses one marker: its analytic velocity is the marker
+      // translation plus the grid-scaled fraction of the prescribed affine change to each face.
+      pointGeometry.setDrawRange(0,dt?1:points.length);
       const value=(p:number[],axis:number)=>fixture.b[axis]+fixture.a[axis].reduce((s,v,i)=>s+v*p[i],0);
       const data=velocity.image.data as Float32Array;
       for(let z=0;z<grid;z++)for(let y=0;y<grid;y++)for(let x=0;x<grid;x++)for(let axis=0;axis<3;axis++){
@@ -70,9 +76,10 @@ export function validateTransfers(renderer:THREE.WebGLRenderer){
       for(let z=0;z<grid;z++)for(let y=0;y<grid;y++)for(let x=0;x<grid;x++)for(let axis=0;axis<3;axis++){
         const i=(y*width+x+z*grid)*4+axis;if(weights[i]<1e-4)continue;
         const p=[x+.5,y+.5,z+.5];p[axis]-=.5;samples++;
-        gridError=Math.max(gridError,Math.abs(momentum[i]/weights[i]-value(p,axis)));
+        const expected=dt?value(points[0],axis)+Math.exp(-18*dt*.105**2)*(value(p,axis)-value(points[0],axis)):value(p,axis);
+        gridError=Math.max(gridError,Math.abs(momentum[i]/weights[i]-expected));
       }
-      results.push({name:fixture.name,gradientError,gridError,samples,pass:gradientError<1e-5&&gridError<1e-5&&samples>0});
+      results.push({name:fixture.name,dt,gradientError,gridError,samples,pass:gradientError<1e-5&&gridError<1e-5&&samples>0});
     }
     return {passed:results.every(r=>r.pass),checks:results};
   }finally{

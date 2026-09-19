@@ -24,7 +24,7 @@ async function start() {
   input.onModeChange=toolbar.update;
   input.onMotionChange=toolbar.update;
   scene.onWarning = notify;
-  scene.onError = message => { error.hidden = false; error.textContent = message; };
+  scene.onError = message => { error.hidden = !message; error.textContent = message; };
 
   // Development diagnostics have a separate explicit route, never appearing on /.
   if (diagnostics) {
@@ -32,6 +32,21 @@ async function start() {
     qa.className = 'qa'; qa.setAttribute('aria-label', '开发验证');
     qa.innerHTML = '<div class="qa-actions"><button data-scenario="rest">静置测试</button><button data-scenario="shake">摇晃测试</button><button data-scenario="impulse">急停波浪测试</button><button data-scenario="tilt">倾倒测试</button><button data-scenario="pour">加水测试</button><button data-scenario="droplet">水滴体积</button><button data-scenario="surface">液面形态</button><button data-scenario="capacity">容量边界测试</button><button data-scenario="stress">两分钟摇晃测试</button></div><div class="qa-actions"><button id="reset">重置</button><button id="pause">暂停</button><button id="motion">体感</button><button id="add-water">滴水</button></div><label>画质<select id="quality"><option value="low">流畅</option><option value="medium">均衡</option><option value="high">细腻</option></select></label><label>水面诊断<select id="debug-surface"><option value="0">正常</option><option value="1">深度</option><option value="2">法线</option><option value="3">厚度</option></select></label><pre id="qa-stats"></pre><p id="qa-message"></p>';
     app.append(qa);
+    const fishTiming=document.createElement('button');fishTiming.textContent='水族馆整帧耗时';qa.querySelector('.qa-actions')!.append(fishTiming);
+    fishTiming.addEventListener('click',async()=>{
+      fishTiming.disabled=true;opticsResult.textContent='整帧 GPU 测量中';
+      try{opticsResult.textContent=JSON.stringify(await scene.measureAquariumPerformance(),null,2);}
+      catch(error){opticsResult.textContent=String(error);}
+      finally{fishTiming.disabled=false;}
+    });
+    const fishButton=document.createElement('button');fishButton.textContent='水族馆 GPU 基准';
+    qa.querySelector('.qa-actions')!.append(fishButton);
+    fishButton.addEventListener('click',async()=>{
+      scene.setPaused(true);fishButton.disabled=true;
+      try{const {validateAquarium}=await import('./fluid/aquarium-validation');opticsResult.textContent=JSON.stringify(validateAquarium(scene.renderer),null,2);}
+      catch(error){opticsResult.textContent=String(error);}
+      finally{fishButton.disabled=false;}
+    });
     const opticsButton=document.createElement('button');opticsButton.textContent='光学基准';
     const opticsResult=document.createElement('pre');opticsResult.id='optics-result';
     qa.querySelector('.qa-actions')!.append(opticsButton);qa.prepend(opticsResult);
@@ -45,6 +60,22 @@ async function start() {
     });
     const boundaryButton=document.createElement('button');boundaryButton.textContent='贴壁基准';
     const pressureButton=document.createElement('button');pressureButton.textContent='压力残差';
+    const volumeButton=document.createElement('button');volumeButton.textContent='体积恢复基准';
+    qa.querySelector('.qa-actions')!.append(volumeButton);
+    volumeButton.addEventListener('click',async()=>{
+      scene.setPaused(true);volumeButton.disabled=true;
+      try{const {validateVolumeSource}=await import('./fluid/volume-validation');opticsResult.textContent=JSON.stringify(validateVolumeSource(scene.renderer),null,2);}
+      catch(error){opticsResult.textContent=String(error);}
+      finally{volumeButton.disabled=false;}
+    });
+    const sprayButton=document.createElement('button');sprayButton.textContent='水滴重力基准';
+    qa.querySelector('.qa-actions')!.append(sprayButton);
+    sprayButton.addEventListener('click',async()=>{
+      scene.setPaused(true);sprayButton.disabled=true;
+      try{const {validateSpray}=await import('./fluid/spray-validation');opticsResult.textContent=JSON.stringify(validateSpray(scene.renderer),null,2);}
+      catch(error){opticsResult.textContent=String(error);}
+      finally{sprayButton.disabled=false;}
+    });
     const sloshingButton=document.createElement('button');sloshingButton.textContent='小幅波浪测试';
     qa.querySelector('.qa-actions')!.append(sloshingButton);
     sloshingButton.addEventListener('click',()=>scene.startScenario('sloshing'));
@@ -54,6 +85,9 @@ async function start() {
     const longSettleButton=document.createElement('button');longSettleButton.textContent='长时静置恢复';
     qa.querySelector('.qa-actions')!.append(longSettleButton);
     longSettleButton.addEventListener('click',()=>scene.startScenario('settle-long'));
+    const shakeSettleButton=document.createElement('button');shakeSettleButton.textContent='强摇晃后恢复';
+    qa.querySelector('.qa-actions')!.append(shakeSettleButton);
+    shakeSettleButton.addEventListener('click',()=>scene.startScenario('settle-shake'));
     const hydroButton=document.createElement('button');hydroButton.textContent='静水压力基准';
     qa.querySelector('.qa-actions')!.append(hydroButton);
     hydroButton.addEventListener('click',async()=>{
@@ -138,7 +172,7 @@ async function start() {
     qa.querySelector('#add-water')!.addEventListener('click', () => scene.emitWater());
     scene.onUpdate = () => {
       toolbar.update();
-      qa.querySelector('#qa-stats')!.textContent = JSON.stringify({ ...scene.solver.stats, viewAzimuth:scene.controls.getAzimuthalAngle(),viewPolar:scene.controls.getPolarAngle(),tankPosition:scene.position.toArray(),tankTilt:[scene.targetEuler.x,scene.targetEuler.z], paused: scene.paused, motion: input.motionEnabled, quality: scene.quality, pendingQuality: scene.pendingQuality, framesPerSecond: Math.round(scene.fps), simulationRate:scene.simulationRate, surfaceGpuMilliseconds:scene.surfaceGpuMilliseconds, resolutionScale: scene.resolutionScale, textures: scene.renderer.info.memory.textures, scenario: scene.qaResult }, null, 2);
+      qa.querySelector('#qa-stats')!.textContent = JSON.stringify({ ...scene.solver.stats, fishCount:scene.fishCount, viewAzimuth:scene.controls.getAzimuthalAngle(),viewPolar:scene.controls.getPolarAngle(),tankPosition:scene.position.toArray(),tankTilt:[scene.targetEuler.x,scene.targetEuler.z], paused: scene.paused, motion: input.motionEnabled, quality: scene.quality, pendingQuality: scene.pendingQuality, framesPerSecond: Math.round(scene.fps), simulationRate:scene.simulationRate, surfaceGpuMilliseconds:scene.surfaceGpuMilliseconds, resolutionScale: scene.resolutionScale, textures: scene.renderer.info.memory.textures, scenario: scene.qaResult }, null, 2);
       qa.querySelector('#pause')!.textContent = scene.paused ? '继续' : '暂停';
       qa.querySelector('#qa-message')!.textContent = status.textContent;
     };

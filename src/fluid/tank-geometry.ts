@@ -1,7 +1,8 @@
+import {TANK,WALL} from '../config';
 /** Exact five open-top wall boxes, shared by physics and liquid rendering. */
 export const tankGeometry=`
-const vec3 tank=vec3(1.0,0.72,0.65);
-const float wall=0.06;
+const vec3 tank=vec3(${TANK.x.toFixed(6)},${TANK.y.toFixed(6)},${TANK.z.toFixed(6)});
+const float wall=${WALL.toFixed(6)};
 float boxSdf(vec3 p,vec3 b){vec3 d=abs(p)-b;return length(max(d,0.0))+min(max(d.x,max(d.y,d.z)),0.0);}
 float tankSdf(vec3 p){
   vec3 q=uInverse*(p-uCenter);

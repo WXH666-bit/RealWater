@@ -38,25 +38,44 @@ uniform sampler2D uAffineY;
 uniform sampler2D uAffineZ;
 uniform vec2 uParticleSize;
 ${tankGeometry}
+float gridColumns(){return min(uGrid.z,floor(4096./uGrid.x));}
+vec2 gridSize(){return vec2(uGrid.x*gridColumns(),uGrid.y*ceil(uGrid.z/gridColumns()));}
 #ifndef VERTEX_STAGE
-ivec3 coord(){return ivec3(int(gl_FragCoord.x)%int(uGrid.x),int(gl_FragCoord.y),int(gl_FragCoord.x)/int(uGrid.x));}
+ivec3 coord(){ivec2 p=ivec2(gl_FragCoord.xy);return ivec3(p.x%int(uGrid.x),p.y%int(uGrid.y),p.x/int(uGrid.x)+(p.y/int(uGrid.y))*int(gridColumns()));}
 #endif
-ivec2 atlas(ivec3 p){p=clamp(p,ivec3(0),ivec3(uGrid)-1);return ivec2(p.x+p.z*int(uGrid.x),p.y);}
+ivec2 atlas(ivec3 p){p=clamp(p,ivec3(0),ivec3(uGrid)-1);return ivec2(p.x+(p.z%int(gridColumns()))*int(uGrid.x),p.y+(p.z/int(gridColumns()))*int(uGrid.y));}
 vec4 at(sampler2D t,ivec3 p){return texelFetch(t,atlas(p),0);}
 vec3 world(ivec3 p){return uOrigin+(vec3(p)+0.5)*uCell;}
 vec4 sampleGrid(sampler2D t,vec3 p){
   p=clamp(p,vec3(0.0),uGrid-1.001);
-  vec3 b=floor(p),f=fract(p);
-  vec2 size=vec2(uGrid.x*uGrid.z,uGrid.y);
-  vec2 a=vec2(b.z*uGrid.x+p.x+0.5,p.y+0.5)/size;
-  vec2 c=vec2(min(b.z+1.,uGrid.z-1.)*uGrid.x+p.x+0.5,p.y+0.5)/size;
-  return mix(texture(t,a),texture(t,c),f.z);
+  ivec3 b=ivec3(floor(p));vec3 f=fract(p);
+  // Explicit interpolation also works for Float32 grids without float-linear
+  // filtering and never interpolates between unrelated atlas tiles.
+  return mix(mix(mix(at(t,b),at(t,b+ivec3(1,0,0)),f.x),
+                 mix(at(t,b+ivec3(0,1,0)),at(t,b+ivec3(1,1,0)),f.x),f.y),
+             mix(mix(at(t,b+ivec3(0,0,1)),at(t,b+ivec3(1,0,1)),f.x),
+                 mix(at(t,b+ivec3(0,1,1)),at(t,b+ivec3(1,1,1)),f.x),f.y),f.z);
 }
 vec3 sampleVelocity(sampler2D t,vec3 p){
   vec3 g=(p-uOrigin)/uCell;
   return vec3(sampleGrid(t,g-vec3(0,.5,.5)).x,sampleGrid(t,g-vec3(.5,0,.5)).y,sampleGrid(t,g-vec3(.5,.5,0)).z);
 }
 bool fluid(ivec3 q){float volume=at(uBoundary,q).a;return volume>.01&&at(uWeights,q).a>.5*max(volume,.1);}
+float volumeSource(ivec3 q){
+  // Recover severe compression without an unbounded, positive-only pump.
+  // Permit compression only in an interior stencil: low surface density is
+  // normal and must not pull the free surface inward. The 10% band avoids
+  // responding to marker-lattice noise; uCell gives a rate in seconds.
+  float relative=at(uWeights,q).a/max(uRestDensity,1.);
+  float correction=max(relative-1.1,0.);
+  bool interior=at(uBoundary,q).a>.99;
+  for(int axis=0;axis<3;axis++){
+    ivec3 off=ivec3(0);off[axis]=1;
+    interior=interior&&fluid(q-off)&&fluid(q+off);
+  }
+  if(interior)correction+=min(relative-.9,0.);
+  return uCell*1.5*clamp(correction,-.2,4.);
+}
 // Place zero air pressure at the interpolated liquid boundary, not at the
 // next grid centre. The same fraction must be used by solve and projection.
 float surfaceFraction(ivec3 liquid,ivec3 air){
@@ -71,6 +90,19 @@ float face(sampler2D tex,ivec3 q,int axis){
   return mix(wallVelocity(p)[axis],at(tex,q)[axis],open);
 }
 bool inDomain(vec3 p){vec3 q=(p-uOrigin)/uCell;return all(greaterThan(q,vec3(1)))&&all(lessThan(q,uGrid-2.));}
+// A lone marker contributes at most one unit to any density cell. Being in
+// the atlas is not evidence of immersion: sparse spray must remain ballistic.
+float liquidCoupling(vec3 p){
+  if(!inDomain(p))return 0.;
+  vec3 local=uInverse*(p-uCenter);
+  // Once outside the open tank, spray is ballistic. Kernel support from the
+  // other side of glass must not attach a drop to the interior velocity field.
+  if(any(greaterThanEqual(abs(local.xz),tank.xz))||local.y<=-tank.y||local.y>=tank.y)return 0.;
+  ivec3 base=ivec3(floor((p-uOrigin)/uCell-.5));float support=0.;
+  for(int x=0;x<2;x++)for(int y=0;y<2;y++)for(int z=0;z<2;z++)
+    support=max(support,at(uWeights,base+ivec3(x,y,z)).a);
+  return smoothstep(1.25,1.5,support);
+}
 `;
 
 // Face-area fractions use four triangles sharing a center sample; the center
@@ -126,12 +158,15 @@ void main(){
   vec4 p=texelFetch(uPositions,uv,0);
   vGridPosition=(p.xyz-uOrigin)/uCell;
   vVelocity=texelFetch(uVelocities,uv,0).xyz;
-  vAffineX=texelFetch(uAffineX,uv,0).xyz;
-  vAffineY=texelFetch(uAffineY,uv,0).xyz;
-  vAffineZ=texelFetch(uAffineZ,uv,0).xyz;
+  // Dissipate unresolved affine modes, not uniform translation. Undamped
+  // linear-kernel APIC repeatedly fed these modes back after a disturbance.
+  float retention=exp(-18.*uDt*pow(.105/uCell,2.));
+  vAffineX=texelFetch(uAffineX,uv,0).xyz*retention;
+  vAffineY=texelFetch(uAffineY,uv,0).xyz*retention;
+  vAffineZ=texelFetch(uAffineZ,uv,0).xyz*retention;
   vLayer=int(floor(vGridPosition.z))+uLayer;
-  vec2 c=vec2(float(vLayer)*uGrid.x+floor(vGridPosition.x)+.5,floor(vGridPosition.y)+.5);
-  gl_Position=vec4(c/vec2(uGrid.x*uGrid.z,uGrid.y)*2.-1.,0,1);
+  vec2 c=vec2(atlas(ivec3(0,0,vLayer)))+floor(vGridPosition.xy)+.5;
+  gl_Position=vec4(c/gridSize()*2.-1.,0,1);
   gl_PointSize=3.;
   if(p.a<.5||!inDomain(p.xyz)||vLayer<0||float(vLayer)>=uGrid.z)gl_Position=vec4(3,3,3,1);
 }
@@ -203,9 +238,8 @@ out vec4 result;
 void main(){
   ivec3 q=coord();if(!fluid(q)){result=vec4(0);return;}
   float div=face(uGridVelocity,q+ivec3(1,0,0),0)-face(uGridVelocity,q,0)+face(uGridVelocity,q+ivec3(0,1,0),1)-face(uGridVelocity,q,1)+face(uGridVelocity,q+ivec3(0,0,1),2)-face(uGridVelocity,q,2);
-  // Correct bulk crowding using the same marker volume as initialization and
-  // emission. Partial wall volume is not a particle-kernel mass fraction.
-  div-=max(at(uWeights,q).a-uRestDensity,0.)*.35;
+  // A bounded volume correction complements the divergence projection.
+  div-=volumeSource(q);
   result=vec4(div,0,0,1);
 }
 `;
@@ -220,7 +254,9 @@ void main(){
     if(fluid(p)){sum+=open*at(uPressure,p).r;n+=open;}
     else n+=open/surfaceFraction(q,p);
   }
-  result=vec4(n>1e-4?(sum-at(uDivergence,q).r)/n:0.,0,0,1);
+  float solved=n>1e-4?(sum-at(uDivergence,q).r)/n:0.;
+  // Weighted Jacobi damps the alternating-grid error of warm-started solves.
+  result=vec4(mix(at(uPressure,q).r,solved,.7),0,0,1);
 }
 `;
 export const projectFragment = common + `
@@ -348,22 +384,58 @@ layout(location=1)out vec4 outVelocity;
 uniform mat4 uViewProjection;
 uniform bool uInjectOnly;
 uniform float uEmissionVelocity;
+// Approximate the available trilinear-kernel volume at glass. Without this
+// normalization a wall looks like a density minimum and attracts the shift.
+// Exact for upright planar walls; local-axis approximation while tilted.
+float hatIntegral(float x){
+  x=clamp(x,-1.,1.);
+  return x<0.?.5*(x+1.)*(x+1.):1.-.5*(1.-x)*(1.-x);
+}
+float markerDensity(ivec3 q){
+  vec3 local=uInverse*(world(q)-uCenter);
+  float volume=(hatIntegral((tank.x-local.x)/uCell)-hatIntegral((-tank.x-local.x)/uCell))
+    *(hatIntegral((tank.z-local.z)/uCell)-hatIntegral((-tank.z-local.z)/uCell))
+    *(1.-hatIntegral((-tank.y-local.y)/uCell));
+  return at(uWeights,q).a/max(volume,.05);
+}
+vec3 redistribute(vec3 p,ivec2 id){
+  ivec3 base=ivec3(floor((p-uOrigin)/uCell-.5));
+  vec3 f=fract((p-uOrigin)/uCell-.5),gradient=vec3(0);float excess=0.;
+  for(int x=0;x<2;x++)for(int y=0;y<2;y++)for(int z=0;z<2;z++){
+    vec3 side=vec3(x,y,z),w=mix(1.-f,f,side),sign=side*2.-1.;
+    float e=max(markerDensity(base+ivec3(x,y,z))-uRestDensity,0.);
+    gradient+=e*vec3(sign.x*w.y*w.z,sign.y*w.x*w.z,sign.z*w.x*w.y);
+    excess+=e*w.x*w.y*w.z;
+  }
+  // Position-only regularization: conserve marker count and momentum instead
+  // of asking the pressure solve to expand every crowded cell indefinitely.
+  vec3 shift=-.04*uCell*gradient/max(uRestDensity,1.);
+  float seed=float(id.x+id.y*256);
+  vec3 jitter=fract(sin(seed+vec3(1,17,43))*43758.5453)-.5;
+  // Deterministically separate coincident markers only in severe crowding.
+  shift+=jitter*uCell*.006*smoothstep(.5,2.,excess/max(uRestDensity,1.));
+  // This is a slow sampling correction, not fluid transport. A per-second
+  // bound prevents a crowded stencil changing cells from visibly jumping.
+  return shift/max(1.,length(shift)/max(.2*uCell*uDt,1e-8));
+}
 void main(){
   ivec2 uv=ivec2(gl_FragCoord.xy);
   vec4 seed=texelFetch(uSeeds,uv,0);
   vec4 p=texelFetch(uPositions,uv,0);vec3 v=texelFetch(uVelocities,uv,0).xyz;
   if(seed.a>.5){outPosition=seed;outVelocity=vec4(0,uEmissionVelocity,0,1);return;}
   if(p.a<.5||uInjectOnly){outPosition=p;outVelocity=vec4(v,p.a);return;}
-  vec3 advectV;
-  if(inDomain(p.xyz)){
+  vec3 advectV,ballistic=v-vec3(0,uGravity*uDt,0);
+  float coupling=liquidCoupling(p.xyz);
+  if(coupling>0.){
     vec3 pic=sampleVelocity(uGridVelocity,p.xyz);
     // APIC preserves local velocity gradients in the affine state instead of
     // retaining unresolved FLIP noise in the marker's translational velocity.
-    v=pic;
-    // Transport markers with the pressure-projected grid velocity.
+    v=mix(ballistic,pic,coupling);
+    // Retain the face-flux transport: replacing it with ordinary trilinear
+    // velocity compressed markers into the bottom corner during pouring.
     // CFL-limited RK2 substeps preserve the full distance travelled. Clipping
     // displacement instead of substepping makes falling water look viscous.
-    float transportSpeed=max(length(pic),length(transportVelocity(p.xyz)));
+    float transportSpeed=max(max(length(pic),length(ballistic)),length(transportVelocity(p.xyz)));
     int substeps=clamp(int(ceil(transportSpeed*uDt/(uCell*.7))),1,4);
     float subDt=uDt/float(substeps);vec3 trajectory=p.xyz;
     for(int i=0;i<4;i++){
@@ -372,10 +444,11 @@ void main(){
       vec3 midpoint=trajectory+startV*subDt*.5;
       trajectory+=transportVelocity(midpoint)*subDt;
     }
-    advectV=(trajectory-p.xyz)/uDt;
-  }else{v.y-=uGravity*uDt;advectV=v;}
+    advectV=mix(ballistic,(trajectory-p.xyz)/uDt,coupling);
+  }else{v=ballistic;advectV=v;}
   float speed=length(v);if(speed>16.)v*=16./speed;
   vec3 newP=p.xyz+advectV*uDt;
+  if(coupling>0.)newP+=redistribute(p.xyz,uv)*coupling;
   vec3 oldQ=uPreviousInverse*(p.xyz-uPreviousCenter);
   vec3 q=uInverse*(newP-uCenter);
   vec3 wallV=wallVelocity(newP);

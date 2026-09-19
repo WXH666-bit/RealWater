@@ -1,6 +1,7 @@
 import { SURFACE_MIN_WEIGHT, BULK_SUPPORT } from './surface-field';
 import { backdropShader } from './backdrop';
 import { tankGeometry } from './tank-geometry';
+import { fishRayShader } from './fish-shaders';
 
 // Continuous world-space reconstruction follows Zhu & Bridson 2005, §5.
 // Particle splats below build an acceleration volume, never the visible surface.
@@ -375,7 +376,17 @@ vec3 traceInterior(vec3 point,vec3 inside,vec3 cameraPosition,float height,out f
   // creating bright patches and a discontinuity at the critical angle.
   for(int bounce=0;bounce<4;bounce++){
     vec3 exitPoint;float segment;
-    if(!waterExit(pathPoint,pathDirection,exitPoint,segment)){
+    bool foundExit=waterExit(pathPoint,pathDirection,exitPoint,segment);
+    #ifdef AQUARIUM
+    float fishDistance;vec3 fishColor;
+    if(fishHit(pathPoint,pathDirection,segment,fishDistance,fishColor)){
+      vec3 absorption=exp(-vec3(.065,.015,.008)*fishDistance);
+      transmitted+=throughput*(vec3(.008,.025,.032)*(1.-absorption)+absorption*fishColor);
+      if(bounce==0)thickness=fishDistance;
+      pathStatus=vec3(0,.7,0);return transmitted;
+    }
+    #endif
+    if(!foundExit){
       if(bounce==0)pathStatus=vec3(1,0,0);
       break;
     }
@@ -402,7 +413,7 @@ vec3 traceInterior(vec3 point,vec3 inside,vec3 cameraPosition,float height,out f
   return transmitted;
 }
 `;
-export const rayFragment=fieldCommon+waterOptics+surfaceTracing+interiorRadiance+`
+export const rayFragment=fieldCommon+waterOptics+surfaceTracing+fishRayShader+interiorRadiance+`
 uniform sampler2D uBounds;
 uniform sampler2D uBackground;
 uniform vec2 uResolution;

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { PROFILES, type Quality } from '../config';
+import { TANK, PROFILES, type Quality } from '../config';
 import { fullscreenVertex } from './shaders';
 import { dielectricOptics, fieldCommon, surfaceTracing, interiorRadiance } from './implicit-shaders';
 
@@ -106,15 +106,15 @@ export function validateOptics(renderer:THREE.WebGLRenderer){
       }
       uniforms.uFixture.value=2;quad.material=field;renderer.setRenderTarget(volume);renderer.render(scene,camera);
       uniforms.uClipToTank.value=true;uniforms.uTestMode.value=4;uniforms.uRay.value.set(1,0,0);
-      for(const [name,y,z] of [['bottom grazing',-.7195,0],['side grazing',-.4,.6495]] as const){
-        uniforms.uEntry.value.set(-1,y,z);
-        inspect(`${quality}/${name}/opposite wall exit`,[1,y,z,2],.002);
+      for(const [name,y,z] of [['bottom grazing',-TANK.y+.0005,0],['side grazing',-.4,TANK.z-.0005]] as const){
+        uniforms.uEntry.value.set(-TANK.x,y,z);
+        inspect(`${quality}/${name}/opposite wall exit`,[TANK.x,y,z,2*TANK.x],.002);
       }
       // A shallow negative implicit value is legal throughout the liquid; it
       // is not a signed distance to its far boundary. Exercise the worst step.
       uniforms.uInterior.value=.0005;quad.material=field;renderer.setRenderTarget(volume);renderer.render(scene,camera);
-      uniforms.uEntry.value.set(-1,-.4,0);
-      inspect(`${quality}/shallow implicit field/opposite wall exit`,[1,-.4,0,2],.002);
+      uniforms.uEntry.value.set(-TANK.x,-.4,0);
+      inspect(`${quality}/shallow implicit field/opposite wall exit`,[TANK.x,-.4,0,2*TANK.x],.002);
       uniforms.uClipToTank.value=false;uniforms.uTestMode.value=0;
       volume.dispose();volume=null;uniforms.uField.value=null;uniforms.uMoments.value=null;uniforms.uFieldMetadata.value=null;
     }
