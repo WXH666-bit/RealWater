@@ -261,37 +261,10 @@ float dielectricFresnel(float cosine,float eta){
 `;
 const waterOptics=dielectricOptics+`
 vec3 displayColor(vec3 c){return mix(c*12.92,1.055*pow(max(c,vec3(0.)),vec3(1./2.4))-.055,step(vec3(.0031308),c));}
-float panel(vec2 p,vec2 center,vec2 halfSize){
-  vec2 edge=abs(p-center)-halfSize;
-  // Finite light-source edge, independent of derivatives in divergent rays.
-  float d=max(edge.x,edge.y),width=.045;
-  return 1.-smoothstep(-width,width,d);
-}
-vec3 environment(vec3 r){
-  // Clear water reflects sharp light sources. A broad grey lobe made every
-  // ripple look like a rounded, opaque rubber surface.
-  vec3 sky=mix(vec3(.012,.018,.021),vec3(.13,.17,.19),smoothstep(-.3,1.,r.y));
-  if(r.y>0.03){
-    vec2 ceiling=r.xz/r.y;
-    float key=panel(ceiling,vec2(-.9,-.55),vec2(.5,.35));
-    float strip=panel(ceiling,vec2(.9,.15),vec2(.08,1.05));
-    sky+=vec3(.9,.95,1.)*key+vec3(.5,.6,.65)*strip;
-  }
-  return sky;
-}
 `+backdropShader+`
+vec3 environment(vec3 r){return studioRay(vec3(0),r);}
 vec3 transmittedBackground(vec3 point,vec3 direction,vec3 cameraPosition,float height){
-  // Evaluate the same world backdrop as the scene, including offscreen rays.
-  // Sampling a screen image here would also incorrectly pick up rear glass.
-  if(direction.z<-.001){
-    float distance=(-5.-point.z)/direction.z;
-    if(distance>0.){
-      vec3 target=point+direction*distance;
-      float footprint=max(length(target-cameraPosition)*.98/height,.001);
-      return backdropColor(target.xy,vec2(footprint));
-    }
-  }
-  return environment(direction);
+  return studioRay(point,direction);
 }
 `;
 

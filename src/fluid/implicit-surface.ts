@@ -36,7 +36,7 @@ export class FluidSurface {
   private uniforms:Record<string,THREE.IUniform>;
   private layout;
   private fieldRevision=-1;
-  constructor(private renderer:THREE.WebGLRenderer,private solver:FluidSolver){
+  constructor(private renderer:THREE.WebGLRenderer,private solver:FluidSolver,studioUniforms:Record<string,THREE.IUniform>={}){
     this.timerExtension=import.meta.env.DEV?renderer.getContext().getExtension('EXT_disjoint_timer_query_webgl2'):null;
     this.layout=surfaceLayout(solver.profile.cell,solver.quality);
     const layout=this.layout;
@@ -50,7 +50,7 @@ export class FluidSurface {
     this.history=target(layout.width,layout.height,THREE.RedFormat);
     this.bounds=target(1,1);
     const layers=Math.ceil(layout.support/layout.voxel);
-    this.uniforms={
+    this.uniforms={uStudioLift:{value:0},uStudioCenter:{value:new THREE.Vector3()},uStudioHalf:{value:new THREE.Vector3()},...studioUniforms,
       uCenter:solver.uniforms.uCenter,uInverse:solver.uniforms.uInverse,uRotation:solver.uniforms.uRotation,uClipToTank:{value:true},
       uPositions:{value:solver.positions},uParticleSize:{value:solver.particleSize},
       uParticleVelocities:{value:solver.velocities},uHistory:{value:this.history.texture},uHistorySeconds:{value:0},uHasHistory:{value:false},

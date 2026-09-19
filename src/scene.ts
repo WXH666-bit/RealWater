@@ -34,6 +34,8 @@ export class WaterScene {
   private frontGlass = new THREE.Group();
   private surface: FluidSurface;
   private background: THREE.WebGLRenderTarget;
+  private studioRotation=new THREE.Matrix4();
+  private studioUniforms={uStudioLift:{value:0},uStudioCenter:{value:new THREE.Vector3()},uStudioHalf:{value:new THREE.Vector3(TANK.x,TANK.y,TANK.z)}};
   private clock = new StepClock();
   private vp = new THREE.Matrix4();
   private targetQ = new THREE.Quaternion();
@@ -87,7 +89,7 @@ export class WaterScene {
     this.controls.touches = { ONE: null as unknown as THREE.TOUCH, TWO: THREE.TOUCH.DOLLY_ROTATE };
     this.resetCamera();
     this.solver = new FluidSolver(this.renderer, this.quality);
-    this.surface = new FluidSurface(this.renderer, this.solver);
+    this.surface = new FluidSurface(this.renderer, this.solver, this.studioUniforms);
     this.aquarium = new AquariumSystem(this.renderer,this.solver);
     host.append(this.canvas);
     this.resizeObserver = new ResizeObserver(() => this.resize());this.resizeObserver.observe(host);
@@ -110,12 +112,14 @@ export class WaterScene {
       const key = new THREE.DirectionalLight('#e4ffff', 4);key.position.set(-3,5,4);scene.add(key);
       const rim = new THREE.DirectionalLight('#7bb3c7', 2);rim.position.set(4,1,-2);scene.add(rim);
     }
-    const backdrop = new THREE.Mesh(new THREE.PlaneGeometry(80, 80), new THREE.ShaderMaterial({
-      vertexShader: `varying vec2 vUv;void main(){vUv=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
-      fragmentShader: `varying vec2 vUv;${backdropShader}void main(){vec2 p=(vUv-.5)*80.;gl_FragColor=vec4(backdropColor(p,fwidth(p*1.6)),1.);}`,
-      depthWrite: false,
-    }));
-    backdrop.position.z = -5;this.scene.add(backdrop);
+    // A ray-rendered room has real perspective and works through water as well
+    // as around it, including when orbiting behind or below the container.
+    const backdrop = new THREE.Mesh(new THREE.SphereGeometry(25,32,16),new THREE.ShaderMaterial({
+      uniforms:this.studioUniforms,
+      vertexShader:`varying vec3 worldPoint;void main(){worldPoint=(modelMatrix*vec4(position,1.)).xyz;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+      fragmentShader:`varying vec3 worldPoint;${backdropShader}void main(){gl_FragColor=vec4(studioRay(cameraPosition,normalize(worldPoint-cameraPosition)),1.);}`,
+      side:THREE.BackSide,depthWrite:false,toneMapped:false,
+    }));backdrop.frustumCulled=false;backdrop.renderOrder=-100;this.scene.add(backdrop);
     this.scene.add(this.glass);this.frontScene.add(this.frontGlass);
     const {x,y,z}=TANK,w=WALL;
     const walls: [number[],number[]][] = [
@@ -123,14 +127,22 @@ export class WaterScene {
       [[2*w,2*y,2*z+4*w],[-x-w,0,0]],[[2*w,2*y,2*z+4*w],[x+w,0,0]],
       [[2*x,2*y,2*w],[0,0,-z-w]],[[2*x,2*y,2*w],[0,0,z+w]],
     ];
-    const rear = new THREE.MeshPhysicalMaterial({ color: '#f1f6f6', roughness: .03, metalness: 0, transparent: true, opacity: .005, depthWrite: false, side: THREE.BackSide });
-    const front = new THREE.MeshPhysicalMaterial({ color: '#f5f9f9', roughness: .025, metalness: 0, transparent: true, opacity: .007, depthWrite: false, side: THREE.FrontSide });
+    const glassMaterial=(side:THREE.Side)=>new THREE.ShaderMaterial({
+      uniforms:this.studioUniforms,side,transparent:true,depthWrite:false,toneMapped:false,
+      vertexShader:`varying vec3 glassPoint;varying vec3 glassNormal;void main(){glassPoint=(modelMatrix*vec4(position,1.)).xyz;glassNormal=normalize(mat3(modelMatrix)*normal);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,
+      fragmentShader:`varying vec3 glassPoint;varying vec3 glassNormal;${backdropShader}
+        void main(){vec3 v=normalize(glassPoint-cameraPosition),n=normalize(glassNormal);float f=.04+.96*pow(1.-abs(dot(v,n)),5.);
+        vec3 c=studioRay(glassPoint,reflect(v,n));gl_FragColor=vec4(c,mix(.012,.48,f));
+        #include <colorspace_fragment>
+        }`,
+    });
+    const rear=glassMaterial(THREE.BackSide),front=glassMaterial(THREE.FrontSide);
     for (const [size, pos] of walls) {
       const geometry = new THREE.BoxGeometry(...size as [number,number,number]);
       const back = new THREE.Mesh(geometry,rear);back.position.fromArray(pos);this.glass.add(back);
       const face = new THREE.Mesh(geometry,front);face.position.fromArray(pos);this.frontGlass.add(face);
     }
-    const lineMat = new THREE.LineBasicMaterial({ color: '#b9dedf', transparent: true, opacity: .22, depthWrite: false });
+    const lineMat = new THREE.LineBasicMaterial({ color: '#527f76', transparent: true, opacity: .48, depthWrite: false });
     const points: THREE.Vector3[] = [];
     const line = (a: number[],b:number[]) => {points.push(new THREE.Vector3().fromArray(a),new THREE.Vector3().fromArray(b));};
     for (const height of [-y-w,y]) {
@@ -139,16 +151,25 @@ export class WaterScene {
     }
     for (const xx of [-x-w,x+w])for(const zz of [-z-w,z+w])line([xx,-y-w,zz],[xx,y,zz]);
     this.frontGlass.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(points),lineMat));
+    // Polished glass seams have actual thickness rather than a wireframe outline.
+    const seamMaterial=new THREE.MeshPhysicalMaterial({color:'#749b8d',roughness:.13,metalness:.05,transparent:true,opacity:.38,depthWrite:false});
+    const axis=new THREE.Vector3(0,1,0);
+    for(let i=0;i<points.length;i+=2){
+      const direction=points[i+1].clone().sub(points[i]);
+      const seam=new THREE.Mesh(new THREE.CylinderGeometry(.004,.004,direction.length(),6),seamMaterial);
+      seam.position.copy(points[i]).add(points[i+1]).multiplyScalar(.5);
+      seam.quaternion.setFromUnitVectors(axis,direction.normalize());this.frontGlass.add(seam);
+    }
     const ticks: THREE.Vector3[] = [];
     for(let i=0;i<=6;i++){const height=(-.6+i*.2)*y/.72;ticks.push(new THREE.Vector3(x-.16,height,z+2*w+.003),new THREE.Vector3(x-(i%3===0?.02:.08),height,z+2*w+.003));}
-    this.frontGlass.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(ticks),new THREE.LineBasicMaterial({color:'#d4e5e8',transparent:true,opacity:.26,depthWrite:false})));
+    this.frontGlass.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(ticks),new THREE.LineBasicMaterial({color:'#45665f',transparent:true,opacity:.6,depthWrite:false})));
   }
 
   private resetCamera() {
     // Consume orbit inertia before setting the front view, so reset cannot
     // drift back towards the previous angle. A small elevation reveals the water.
     const damping=this.controls.enableDamping;this.controls.enableDamping=false;this.controls.update();
-    this.camera.position.set(0,1.2,5.8);this.controls.target.set(0,-.04,0);this.controls.update();this.controls.saveState();
+    this.camera.position.set(2.15,1.55,5.6);this.controls.target.set(0,-.04,0);this.controls.update();this.controls.saveState();
     this.controls.enableDamping=damping;
   }
   private resize() {
@@ -203,7 +224,7 @@ export class WaterScene {
     this.aquarium.dispose();this.surface.dispose();this.solver.dispose();
     this.quality=this.pendingQuality??this.quality;this.pendingQuality=null;
     this.resolutionScale=PROFILES[this.quality].scale;
-    this.solver=new FluidSolver(this.renderer,this.quality);this.surface=new FluidSurface(this.renderer,this.solver);
+    this.solver=new FluidSolver(this.renderer,this.quality);this.surface=new FluidSurface(this.renderer,this.solver,this.studioUniforms);
     this.aquarium=new AquariumSystem(this.renderer,this.solver);
     const rejected=this.aquarium.restore(fish);
     if(rejected)this.onWarning?.(`水域不足，已收回 ${rejected} 条小鱼。`);
@@ -327,6 +348,18 @@ export class WaterScene {
     if(this.statsTime>2){this.solver.inspect();this.statsTime=0;if(this.solver.stats.invalid>0&&!this.paused){this.setPaused(true);this.onError?.('检测到模拟数值异常，已暂停。请重新开始或选择较低画质。');}}
   };
   private renderScene(){
+    const rotation=this.studioRotation.makeRotationFromQuaternion(this.quaternion).elements;
+    const half=this.studioUniforms.uStudioHalf.value;
+    const x=TANK.x+2*WALL,y=TANK.y+2*WALL,z=TANK.z+2*WALL;
+    half.set(Math.abs(rotation[0])*x+Math.abs(rotation[4])*y+Math.abs(rotation[8])*z,
+      Math.abs(rotation[1])*x+Math.abs(rotation[5])*y+Math.abs(rotation[9])*z,
+      Math.abs(rotation[2])*x+Math.abs(rotation[6])*y+Math.abs(rotation[10])*z);
+    // Presentation lift keeps the lowest corner on the tabletop while tilting.
+    // Shift room rays (equivalent to lifting vessel and following camera), not
+    // solver coordinates, so this cannot inject acceleration into the fluid.
+    this.studioUniforms.uStudioLift.value=Math.max(0,half.y-y);
+    this.studioUniforms.uStudioCenter.value.copy(this.position);
+
     this.glass.position.copy(this.position);this.glass.quaternion.copy(this.quaternion);
     this.frontGlass.position.copy(this.position);this.frontGlass.quaternion.copy(this.quaternion);
     this.renderer.setRenderTarget(this.background);this.renderer.setClearColor('#151d20',1);this.renderer.clear();
